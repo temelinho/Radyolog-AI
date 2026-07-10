@@ -1,0 +1,53 @@
+# Radyoloji AI Sistemi - Core Dependencies
+# Not: torch ve torchvision CUDA versiyonu sisteminize göre değişebilir.
+# Kurulum için: pip install -r requirements.txt
+
+# Web Arayüzü
+streamlit==1.57.0
+
+# LLM / AI API
+anthropic  # Claude 3.5 Sonnet için (pip install anthropic)
+google-genai==2.3.0
+
+# Medikal Görüntü İşleme
+nibabel==5.4.2
+pydicom==3.0.2
+SimpleITK==2.5.5
+dicom2nifti==2.6.2
+MedPy==0.5.2
+
+# nnU-Net (Segmentasyon)
+nnunetv2==2.7.0
+nnunet==1.7.1
+dynamic_network_architectures==0.4.3
+batchgenerators==0.25.2
+batchgeneratorsv2==0.3.2
+
+# TotalSegmentator
+TotalSegmentator==2.13.0
+
+# PyTorch (CUDA versiyonunuzu seçin)
+# GPU (CUDA 12.1):
+# pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# CPU Only:
+# pip install torch torchvision
+
+# Veri İşleme
+numpy==2.4.4
+pandas==3.0.3
+scipy==1.17.1
+scikit-image==0.26.0
+scikit-learn==1.8.0
+
+# Görselleştirme
+plotly==6.7.0
+matplotlib==3.10.9
+
+# PDF Üretimi
+reportlab==4.5.1
+
+# Genel Yardımcılar
+requests==2.34.2
+tqdm==4.67.3
+PyYAML==6.0.3
+huggingface_hub==1.15.0

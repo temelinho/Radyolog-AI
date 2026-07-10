@@ -1,0 +1,65 @@
+# ==============================================
+# Radyoloji AI Projesi - .gitignore
+# ==============================================
+
+# Python Virtual Environment (sanal ortam - çok büyük)
+radyoloji_env_311/
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyc
+
+# PyCharm IDE dosyaları
+.idea/
+
+# nnUNet model ağırlıkları ve preprocessed veriler (çok büyük, GB'larca)
+nnUNet_results/
+nnUNet_preprocessed/
+nnUNet_raw/
+
+# BT görüntü dosyaları (hasta verisi - gizli ve büyük)
+ct_input/
+ct_input_debug/
+ct_output/
+ct_output_debug/
+damar_output/
+debug_input/
+debug_output/
+*.nii
+*.nii.gz
+*.dcm
+
+# Büyük zip/model dosyaları
+*.zip
+*.tar.gz
+*.tar
+*.pt
+*.pth
+*.pkl
+*.model
+
+# Hasta veritabanı (gizli hasta verisi - KVKK)
+patients_db/
+
+# Log dosyaları
+*.log
+debug_full_log.txt
+
+# Geçici dosyalar
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
