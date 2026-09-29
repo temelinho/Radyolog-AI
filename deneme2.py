@@ -1,9 +1,14 @@
 from google import genai
 import os
 
-os.environ['GOOGLE_API_KEY'] = 'AIzaSyCtorKFkpOfALcL6Jwz_PSQE1dR_6ZH-Xk'
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-client = genai.Client(api_key=os.environ['GOOGLE_API_KEY'])
+# Anahtar .env / ortam degiskeninden okunur (koda gomulmez)
+client = genai.Client(api_key=os.environ.get('GOOGLE_API_KEY', ''))
 
 rapor = """TEKNİK
 Portal venöz faz BT incelemesi yapılmıştır. Kesit kalınlığı 2.5 mm, piksel aralığı 0.64 mm'dir.

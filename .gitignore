@@ -46,6 +46,14 @@ debug_output/
 # Hasta veritabanı (gizli hasta verisi - KVKK)
 patients_db/
 
+# API anahtarları / ortam değişkenleri (GİZLİ - asla commit etme)
+.env
+*.env
+!.env.example
+
+# LLM karşılaştırma çıktıları
+llm_karsilastirma/
+
 # Log dosyaları
 *.log
 debug_full_log.txt

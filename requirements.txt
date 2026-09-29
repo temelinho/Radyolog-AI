@@ -6,8 +6,9 @@
 streamlit==1.57.0
 
 # LLM / AI API
-anthropic  # Claude 3.5 Sonnet için (pip install anthropic)
+anthropic  # Claude Opus 4.8 için (pip install anthropic)
 google-genai==2.3.0
+python-dotenv  # .env dosyasından API anahtarı okuma
 
 # Medikal Görüntü İşleme
 nibabel==5.4.2
