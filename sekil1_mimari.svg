@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 780" font-family="Arial, Helvetica, sans-serif" role="img">
+  <title>Sekil 1. Sistem mimarisi / islem hatti</title>
+  <desc>BT goruntusunden segmentasyon, geometrik analiz, grounded LLM raporlama ve hekim arayuzune uzanan uctan uca islem hatti.</desc>
+  <defs>
+    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="900" height="780" fill="#ffffff"/>
+
+  <!-- 1. Girdi -->
+  <rect x="325" y="24" width="250" height="56" rx="8" fill="#e2e8f0" stroke="#475569" stroke-width="1.5"/>
+  <text x="450" y="48" text-anchor="middle" font-size="16" font-weight="bold" fill="#1f2937">BT Görüntüsü</text>
+  <text x="450" y="68" text-anchor="middle" font-size="13" fill="#475569">.nii / .nii.gz (portal venöz faz)</text>
+
+  <!-- oklar girdi -> segmentasyon -->
+  <path d="M450,80 L450,104 L235,104 L235,128" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arw)"/>
+  <path d="M450,80 L450,104 L665,104 L665,128" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <!-- 2. Segmentasyon (iki kol) -->
+  <rect x="80" y="130" width="310" height="66" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="235" y="156" text-anchor="middle" font-size="15" font-weight="bold" fill="#1f2937">nnU-Net Segmentasyonu</text>
+  <text x="235" y="177" text-anchor="middle" font-size="13" fill="#475569">6 organ + tümör (pretrained)</text>
+
+  <rect x="510" y="130" width="310" height="66" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="665" y="156" text-anchor="middle" font-size="15" font-weight="bold" fill="#1f2937">TotalSegmentator</text>
+  <text x="665" y="177" text-anchor="middle" font-size="13" fill="#475569">Aorta + Portal Ven</text>
+
+  <!-- oklar segmentasyon -> geometri -->
+  <path d="M235,196 L235,222 L450,222 L450,246" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arw)"/>
+  <path d="M665,196 L665,222 L450,222 L450,246" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <!-- 3. Geometrik analiz -->
+  <rect x="300" y="248" width="300" height="66" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="450" y="274" text-anchor="middle" font-size="15" font-weight="bold" fill="#1f2937">Geometrik Analiz (Python)</text>
+  <text x="450" y="295" text-anchor="middle" font-size="13" fill="#475569">Hacim · Mesafe (mm) · Sarma açısı (°)</text>
+
+  <path d="M450,314 L450,352" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <!-- 4. Grounded LLM -->
+  <rect x="300" y="354" width="300" height="66" rx="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.8"/>
+  <text x="450" y="380" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e3a8a">Grounded LLM Raporlama</text>
+  <text x="450" y="401" text-anchor="middle" font-size="13" fill="#1e40af">Claude Opus 4.8 (sadece metrikler)</text>
+
+  <!-- oklar LLM -> ciktilar -->
+  <path d="M450,420 L450,446 L165,446 L165,470" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arw)"/>
+  <path d="M450,420 L450,446 L450,470" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arw)"/>
+  <path d="M450,420 L450,446 L735,446 L735,470" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <!-- 5. Ciktilar (uc kol) -->
+  <rect x="30" y="472" width="270" height="66" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="165" y="498" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f2937">Rezektabilite &amp; Takip</text>
+  <text x="165" y="519" text-anchor="middle" font-size="13" fill="#475569">NCCN · RECIST (boylamsal)</text>
+
+  <rect x="315" y="472" width="270" height="66" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="450" y="498" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f2937">3B Görselleştirme</text>
+  <text x="450" y="519" text-anchor="middle" font-size="13" fill="#475569">Plotly (organ·tümör·damar)</text>
+
+  <rect x="600" y="472" width="270" height="66" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="735" y="498" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f2937">Hekim Arayüzü</text>
+  <text x="735" y="519" text-anchor="middle" font-size="13" fill="#475569">Streamlit + Chatbot</text>
+
+  <!-- alt cizgi ve dipnot -->
+  <line x1="30" y1="586" x2="870" y2="586" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="30" y="612" font-size="12.5" fill="#64748b">Şekil 1. Uçtan uca işlem hattı: segmentasyondan temellendirilmiş (grounded) raporlamaya ve hekim etkileşimine.</text>
+</svg>

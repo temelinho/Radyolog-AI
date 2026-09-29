@@ -4,11 +4,11 @@ import os
 import json
 import tempfile
 import shutil
+import copy
 import SimpleITK as sitk
 import numpy as np
 from scipy import ndimage
 from scipy.ndimage import distance_transform_edt, center_of_mass
-from google import genai
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -24,10 +24,54 @@ import datetime
 RESULTS_FOLDER = r"C:\Users\ASUS\PycharmProjects\TemelProje\nnUNet_results"
 NNUNET_RAW = r"C:\Users\ASUS\PycharmProjects\TemelProje\nnUNet_raw"
 NNUNET_PREPROCESSED = r"C:\Users\ASUS\PycharmProjects\TemelProje\nnUNet_preprocessed"
-GOOGLE_API_KEY = "AIzaSyCtorKFkpOfALcL6Jwz_PSQE1dR_6ZH-Xk"
-PATIENTS_DB_DIR = r"C:\Users\ASUS\PycharmProjects\TemelProje\patients_db"
+# API anahtarlari ve LLM ayarlari (.env / ortam degiskeninden okunur, koda gomulmez)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+PATIENTS_DB_DIR = os.environ.get("PATIENTS_DB_DIR", r"C:\Users\ASUS\PycharmProjects\TemelProje\patients_db")
+
+# Kullanilabilir LLM modelleri (arayuzden secilir)
+LLM_MODELS = {
+    "Claude Opus 4.8": {"provider": "anthropic", "model": "claude-opus-4-8"},
+    "Gemini 2.5 Flash": {"provider": "google", "model": "gemini-2.5-flash"},
+}
+DEFAULT_LLM = "Claude Opus 4.8"
+# Metrikler API'ye gonderilmeden once hasta kimligini (TC/ad) cikar (KVKK/gizlilik)
+ANONYMIZE_FOR_API = True
 
 os.makedirs(PATIENTS_DB_DIR, exist_ok=True)
+
+
+def call_llm(system_prompt, user_prompt, model_label=DEFAULT_LLM, temperature=0.3, max_tokens=2500):
+    """Secilen saglayiciya gore (Anthropic Claude / Google Gemini) LLM cagrisi yapar."""
+    cfg = LLM_MODELS.get(model_label, LLM_MODELS[DEFAULT_LLM])
+    provider, model = cfg["provider"], cfg["model"]
+    if provider == "anthropic":
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY tanimli degil. .env dosyasina ekleyin.")
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model=model, max_tokens=max_tokens, temperature=temperature,
+            system=system_prompt, messages=[{"role": "user", "content": user_prompt}],
+        )
+        return "".join(b.text for b in message.content if getattr(b, "type", None) == "text")
+    elif provider == "google":
+        if not GOOGLE_API_KEY:
+            raise RuntimeError("GOOGLE_API_KEY tanimli degil. .env dosyasina ekleyin.")
+        from google import genai
+        client = genai.Client(api_key=GOOGLE_API_KEY)
+        response = client.models.generate_content(
+            model=model, contents=user_prompt,
+            config=genai.types.GenerateContentConfig(system_instruction=system_prompt, temperature=temperature),
+        )
+        return response.text
+    raise ValueError("Bilinmeyen saglayici: " + str(provider))
 
 ORGAN_TASK = {
     "Pankreas": "007",
@@ -158,6 +202,30 @@ def calculate_encasement(tumor_mask, vessel_mask, spacing):
     gaps = [angles[i+1] - angles[i] for i in range(len(angles)-1)]
     gaps.append(360 - angles[-1] + angles[0])
     return round(360 - max(gaps), 1)
+
+def recist_yanit(caplar_mm):
+    """RECIST 1.1'e gore tedavi yanitini dondurur.
+    caplar_mm: kronolojik sirali tumor caplari (mm); ilk eleman baslangic (baseline).
+    Referans: Eisenhauer et al., Eur J Cancer 2009;45:228-247 (RECIST 1.1).
+    Not: Cap, esdeger kure capidir (RECIST'in en uzun cap olcumunun yaklasigidir).
+    Doner: (etiket, kisaltma, stil)  stil: 'success'|'warning'|'info'
+    """
+    if not caplar_mm or len(caplar_mm) < 2:
+        return None
+    baseline = caplar_mm[0]
+    guncel = caplar_mm[-1]
+    nadir = min(caplar_mm)  # calismadaki en kucuk olcum (baseline dahil)
+    # Tam Yanit (CR): tumor tamamen kaybolmus
+    if guncel <= 0:
+        return ("Tam Yanıt (Complete Response, CR)", "CR", "success")
+    # Progresif Hastalik (PD): nadire gore >=%20 VE mutlak >=5 mm artis
+    if nadir > 0 and (guncel - nadir) >= 5 and ((guncel - nadir) / nadir * 100) >= 20:
+        return ("Progresif Hastalık (Progressive Disease, PD)", "PD", "warning")
+    # Kismi Yanit (PR): baseline'a gore >=%30 azalma
+    if baseline > 0 and ((guncel - baseline) / baseline * 100) <= -30:
+        return ("Kısmi Yanıt (Partial Response, PR)", "PR", "success")
+    # Stabil Hastalik (SD)
+    return ("Stabil Hastalık (Stable Disease, SD)", "SD", "info")
 
 def generate_3d_visualization(mask_path, task_id, damar_dir=None):
     import SimpleITK as sitk
@@ -308,9 +376,7 @@ def generate_3d_visualization(mask_path, task_id, damar_dir=None):
     )
     return fig
 
-def generate_report(bulgular, hasta_bilgi, gecmis_bulgular=None):
-    client = genai.Client(api_key=GOOGLE_API_KEY)
-
+def generate_report(bulgular, hasta_bilgi, gecmis_bulgular=None, model_label=DEFAULT_LLM):
     system_prompt = """Sen 15 yıllık deneyimli bir abdominal radyologsun.
 Sana verilen BT segmentasyon bulgularını ACR ve ESR standartlarına uygun şekilde raporla.
 ÖNEMLİ KURALLAR:
@@ -331,11 +397,13 @@ RAPOR YAPISI:
 5. EVRELEMESİ VE REZEKTABİLİTE (varsa)
 6. SONUÇ VE ÖNERİ"""
 
+    # KVKK/gizlilik: API'ye kimlik gonderme, sadece tarih ve klinik metrikler
     hasta_str = ""
-    if hasta_bilgi.get("ad_soyad"):
-        hasta_str += f"Hasta: {hasta_bilgi['ad_soyad']}\n"
-    if hasta_bilgi.get("tc"):
-        hasta_str += f"TC: {hasta_bilgi['tc']}\n"
+    if not ANONYMIZE_FOR_API:
+        if hasta_bilgi.get("ad_soyad"):
+            hasta_str += f"Hasta: {hasta_bilgi['ad_soyad']}\n"
+        if hasta_bilgi.get("tc"):
+            hasta_str += f"TC: {hasta_bilgi['tc']}\n"
     if hasta_bilgi.get("tarih"):
         hasta_str += f"Tarih: {hasta_bilgi['tarih']}\n"
 
@@ -345,15 +413,7 @@ RAPOR YAPISI:
 
     prompt = f"{hasta_str}\nBT Segmentasyon Bulguları:\n{json.dumps(bulgular, ensure_ascii=False, indent=2)}{gecmis_str}\n\nLütfen standart ve karşılaştırmalı radyoloji raporu oluştur."
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=genai.types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0.3
-        )
-    )
-    return response.text
+    return call_llm(system_prompt, prompt, model_label=model_label, temperature=0.3)
 
 def create_pdf(rapor_text, hasta_bilgi):
     buffer = BytesIO()
@@ -486,9 +546,11 @@ def get_patient_history(tc, current_tarih=None):
 
 st.set_page_config(page_title="Radyoloji AI", layout="wide")
 st.title("🏥 Radyoloji AI Sistemi")
-st.caption("nnU-Net + TotalSegmentator + Gemini AI")
+st.caption("nnU-Net + TotalSegmentator + LLM (Claude / Gemini)")
 
 # Session state
+if 'llm_model' not in st.session_state:
+    st.session_state.llm_model = DEFAULT_LLM
 if 'rapor' not in st.session_state:
     st.session_state.rapor = None
 if 'bulgular' not in st.session_state:
@@ -503,6 +565,17 @@ if 'hasta_bilgi' not in st.session_state:
 # ---- SOL PANEL ----
 with st.sidebar:
     st.header("⚙️ Ayarlar")
+
+    st.subheader("🤖 LLM Modeli")
+    st.session_state.llm_model = st.selectbox(
+        "Rapor/chatbot için model",
+        list(LLM_MODELS.keys()),
+        index=list(LLM_MODELS.keys()).index(st.session_state.llm_model),
+    )
+    _sel = LLM_MODELS[st.session_state.llm_model]
+    _key_ok = (ANTHROPIC_API_KEY if _sel["provider"] == "anthropic" else GOOGLE_API_KEY)
+    if not _key_ok:
+        st.warning(f"{_sel['provider'].upper()} API anahtarı .env'de tanımlı değil.")
 
     st.subheader("📁 Geçmiş Hastalar")
     saved_patients = get_saved_patients()
@@ -606,8 +679,8 @@ with col1:
                     st.write("Geçmiş incelemeler sorgulanıyor...")
                     gecmis_bulgular = get_patient_history(hasta_bilgi.get("tc"), hasta_bilgi.get("tarih"))
                     
-                    st.write("Radyoloji raporu üretiliyor...")
-                    rapor = generate_report(bulgular, hasta_bilgi, gecmis_bulgular)
+                    st.write(f"Radyoloji raporu üretiliyor ({st.session_state.llm_model})...")
+                    rapor = generate_report(bulgular, hasta_bilgi, gecmis_bulgular, model_label=st.session_state.llm_model)
                     st.session_state.rapor = rapor
                     st.session_state.chat_history = []
                     
@@ -697,13 +770,17 @@ with col1:
                 vol_change = ((c_vol - p_vol) / p_vol * 100) if p_vol > 0 else 0
                 cap_change = ((c_cap - p_cap) / p_cap * 100) if p_cap > 0 else 0
                 
-                # Karar/Yanıt Metni
-                if vol_change <= -30:
-                    st.success(f"🎉 **Kısmi Yanıt (Partial Response):** Tümör hacminde %{abs(vol_change):.1f} oranında belirgin küçülme saptandı!")
-                elif vol_change >= 20:
-                    st.warning(f"⚠️ **Progresif Hastalık (Progressive Disease):** Tümör hacminde %{vol_change:.1f} oranında artış/ilerleme saptandı.")
-                else:
-                    st.info(f"ℹ️ **Stabil Hastalık (Stable Disease):** Tümör boyutunda anlamlı bir değişim saptanmadı (Değişim: %{vol_change:+.1f}).")
+                # RECIST 1.1'e gore tedavi yaniti (cap-temelli; baseline & nadir referansli)
+                caplar = [float(s2["bulgular"].get("tumor_cap_mm", 0) or 0) for s2 in tumor_scans]
+                baseline_cap = caplar[0]
+                nadir_cap = min(caplar)
+                yanit = recist_yanit(caplar)
+                if yanit:
+                    etiket, _kisalt, stil = yanit
+                    baseline_degisim = ((c_cap - baseline_cap) / baseline_cap * 100) if baseline_cap > 0 else 0
+                    mesaj = (f"**{etiket}** — Başlangıca göre çap değişimi: %{baseline_degisim:+.1f} "
+                             f"(başlangıç {baseline_cap:.1f} mm, nadir {nadir_cap:.1f} mm, güncel {c_cap:.1f} mm).")
+                    getattr(st, stil)(mesaj)
                 
                 # Metrik sütunları
                 m_col1, m_col2, m_col3 = st.columns(3)
@@ -812,7 +889,6 @@ with col2:
             if patient_history:
                 gecmis_str = "\n\nHastanın Veritabanındaki Tüm Tetkik Geçmişi ve Bulguları:\n" + json.dumps(patient_history, ensure_ascii=False, indent=2)
 
-            client = genai.Client(api_key=GOOGLE_API_KEY)
             system = f"""Sen 15 yıllık deneyimli bir abdominal radyologsun.
 Aşağıdaki raporu sen yazdın. Sorulara kısa, net ve klinik dilde cevap ver.
 Hastanın geçmişteki diğer taramaları ve bulguları da sana sunulmuştur. Eğer kullanıcı farklı tarihlerdeki taramalar arasındaki farkları, tümörün küçülüp küçülmediğini, tedaviye yanıtı sorarsa bu verileri karşılaştırarak tıbbi dilde yanıt ver.
@@ -820,15 +896,7 @@ Bilmediğin şeyleri uydurmadan 'bu veri mevcut değil' de. Türkçe cevap ver.
 RAPOR:
 {st.session_state.rapor}{gecmis_str}"""
 
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=soru,
-                config=genai.types.GenerateContentConfig(
-                    system_instruction=system,
-                    temperature=0.3
-                )
-            )
-            cevap = response.text
+            cevap = call_llm(system, soru, model_label=st.session_state.llm_model, temperature=0.3)
 
             st.session_state.chat_history.append({"role": "assistant", "content": cevap})
 
