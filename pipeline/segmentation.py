@@ -37,14 +37,23 @@ def model_dir(task: str, results_dir: Path | None = None) -> Path:
 
 def check_folds_present(task: str, results_dir: Path | None = None,
                         folds: tuple[int, ...] | None = None) -> dict[str, Any]:
-    """5 fold ağırlığının VARLIĞINI doğrular (C8). Eksikse sessizce düşmez."""
+    """5 fold ağırlığının VARLIĞINI doğrular (C8). Eksikse sessizce düşmez.
+
+    fold_X dizini görev klasörü altında HERHANGİ bir derinlikte aranır; böylece
+    v1 (…/TaskXXX/nnUNetTrainerV2__…/fold_X) ve v2 yapıları birlikte desteklenir.
+    Checkpoint: v2 '*checkpoint*.pth' veya v1 '*.model'.
+    """
     folds = SEGMENTATION.folds if folds is None else folds
     md = model_dir(task, results_dir)
     missing = []
     for f in folds:
-        fdir = md / f"fold_{f}"
-        has_ckpt = fdir.is_dir() and any(fdir.glob("*checkpoint*"))
-        if not has_ckpt:
+        found = False
+        if md.exists():
+            for d in md.rglob(f"fold_{f}"):
+                if d.is_dir() and (any(d.glob("*checkpoint*")) or any(d.glob("*.model"))):
+                    found = True
+                    break
+        if not found:
             missing.append(f)
     return {"ok": len(missing) == 0, "eksik_foldlar": missing,
             "beklenen": list(folds), "model_dir": str(md)}
@@ -52,10 +61,20 @@ def check_folds_present(task: str, results_dir: Path | None = None,
 
 def build_nnunet_command(input_dir: str, output_dir: str, task: str,
                          cfg=SEGMENTATION) -> list[str]:
-    """nnU-Net çıkarım komutunu KURAR (5-fold). Tek fold bayrağı YOK (C8)."""
-    cmd = [cfg.nnunet_cmd, "-i", str(input_dir), "-o", str(output_dir),
-           "-d", task, "-c", cfg.configuration,
-           "-f", *[str(f) for f in cfg.folds]]
+    """nnU-Net çıkarım komutunu KURAR (5-fold). Tek fold bayrağı YOK (C8).
+
+    v1: nnUNet_predict -t <task> -m <cfg>   ·   v2: nnUNetv2_predict -d <id> -c <cfg>
+    (Zenodo MSD ağırlıkları v1; task adı 'Task003_Liver' gibi. v2 için dataset
+    kimliği gerekir — NNUNET_VERSION=v2 ve task yerine Dataset id verilmeli.)
+    """
+    folds = [str(f) for f in cfg.folds]
+    if cfg.nnunet_version == "v1":
+        cmd = [cfg.nnunet_cmd, "-i", str(input_dir), "-o", str(output_dir),
+               "-t", task, "-m", cfg.configuration, "-f", *folds,
+               "--overwrite_existing"]
+    else:
+        cmd = [cfg.nnunet_cmd, "-i", str(input_dir), "-o", str(output_dir),
+               "-d", task, "-c", cfg.configuration, "-f", *folds]
     if not cfg.tta:
         cmd.append("--disable_tta")
     return cmd
@@ -67,10 +86,11 @@ def build_totalseg_command(input_path: str, output_dir: str,
             "--roi_subset", *cfg.totalseg_roi]
 
 
-def validate_nnunet_output(output_dir: str) -> dict[str, Any]:
-    """Çıktı klasöründe en az bir .nii.gz üretilmiş mi? (sabit ad YOK) (C10)."""
+def validate_nnunet_output(output_dir: str, min_bytes: int = 1) -> dict[str, Any]:
+    """Çıktıda BOYUTU>0 en az bir .nii.gz var mı? 0-byte dosya geçersiz (C10/#4)."""
     out = Path(output_dir)
-    masks = sorted(str(p) for p in out.glob("*.nii.gz")) if out.exists() else []
+    masks = (sorted(str(p) for p in out.glob("*.nii.gz")
+                    if p.stat().st_size >= min_bytes) if out.exists() else [])
     return {"ok": len(masks) > 0, "maskeler": masks}
 
 

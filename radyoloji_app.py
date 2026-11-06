@@ -434,19 +434,19 @@ def slugify(text):
     })
     return text.translate(translation_table)
 
-def save_patient(hasta_bilgi, bulgular, rapor, chat_history, current_file=None):
+def _new_patient_filename(hasta_bilgi, bulgular):
+    """PHI'siz pseudonim dosya adı: sha1(TC) + organ + zaman (C22/F22)."""
     import hashlib
-    os.makedirs(PATIENTS_DB_DIR, exist_ok=True)
-    if current_file and os.path.exists(os.path.join(PATIENTS_DB_DIR, current_file)):
-        file_name = current_file
-    else:
-        # Dosya adında PHI YOK: TC'nin pseudonim özeti + organ + zaman (C22/F22)
-        tc = str(hasta_bilgi.get("tc") or "anon")
-        pid = hashlib.sha1(tc.encode("utf-8")).hexdigest()[:10]
-        organ = slugify(str((bulgular or {}).get("organ") or "organ")).lower().replace(" ", "-")
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_name = f"{pid}_{organ}_{ts}.json"
+    tc = str(hasta_bilgi.get("tc") or "anon")
+    pid = hashlib.sha1(tc.encode("utf-8")).hexdigest()[:10]
+    organ = slugify(str((bulgular or {}).get("organ") or "organ")).lower().replace(" ", "-")
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{pid}_{organ}_{ts}.json"
 
+def save_patient(hasta_bilgi, bulgular, rapor, chat_history, current_file=None):
+    os.makedirs(PATIENTS_DB_DIR, exist_ok=True)
+    # Verilen ad (varsa) kullanılır; yoksa yeni pseudonim ad üretilir.
+    file_name = current_file or _new_patient_filename(hasta_bilgi, bulgular)
     file_path = os.path.join(PATIENTS_DB_DIR, file_name)
     data = {
         "hasta_bilgi": hasta_bilgi,
@@ -538,6 +538,10 @@ if 'current_patient_file' not in st.session_state:
     st.session_state.current_patient_file = None
 if 'hasta_bilgi' not in st.session_state:
     st.session_state.hasta_bilgi = {"ad_soyad": "", "tc": "", "tarih": datetime.date.today().strftime("%d.%m.%Y")}
+# Açık raporun AİT OLDUĞU kimlik (form taslağından AYRI) — yanlış hastaya
+# rapor/sohbet bağlanmasını önler (C21/#2). Form hasta_bilgi = sonraki analiz taslağı.
+if 'active_hasta' not in st.session_state:
+    st.session_state.active_hasta = None
 
 # ---- SOL PANEL ----
 with st.sidebar:
@@ -566,6 +570,7 @@ with st.sidebar:
                 st.session_state.rapor = data.get("rapor")
                 st.session_state.chat_history = data.get("chat_history", [])
                 st.session_state.current_patient_file = data.get("file_name", selected_patient_file)
+                st.session_state.active_hasta = data.get("hasta_bilgi", {})  # açık rapor bu kimliğe ait (#2)
                 st.success("Hasta başarıyla yüklendi!")
     else:
         st.info("Kayıtlı hasta bulunamadı.")
@@ -662,8 +667,9 @@ with col1:
                     st.write(f"Radyoloji raporu üretiliyor ({st.session_state.llm_model})...")
                     rapor = generate_report(bulgular, hasta_bilgi, gecmis_bulgular, model_label=st.session_state.llm_model)
 
-                    # 5. Kayıt (atomik) + maskeler
-                    current_file = save_patient(hasta_bilgi, bulgular, rapor, [])
+                    # 5. ÖNCE maskeleri kopyala, SONRA JSON'u yaz: kopya hatasında
+                    #    eksik kayıt (rapor var, 3D yok) kalmaz (#2)
+                    current_file = _new_patient_filename(hasta_bilgi, bulgular)
                     patient_mask_dir = os.path.join(PATIENTS_DB_DIR, current_file.replace(".json", "_masks"))
                     os.makedirs(patient_mask_dir, exist_ok=True)
                     shutil.copy(mask_path, os.path.join(patient_mask_dir, "segmentation.nii.gz"))
@@ -673,12 +679,14 @@ with col1:
                         shutil.copy(aorta_src, os.path.join(patient_mask_dir, "aorta.nii.gz"))
                     if os.path.exists(portal_src):
                         shutil.copy(portal_src, os.path.join(patient_mask_dir, "portal_vein.nii.gz"))
+                    save_patient(hasta_bilgi, bulgular, rapor, [], current_file=current_file)  # JSON en son
 
-                    # Hepsi başarılı -> session state TEK SEFERDE (eski sonuç bozulmaz) (C21)
+                    # Hepsi başarılı -> session state TEK SEFERDE + açık kimlik (C21/#2)
                     st.session_state.bulgular = bulgular
                     st.session_state.rapor = rapor
                     st.session_state.chat_history = []
                     st.session_state.current_patient_file = current_file
+                    st.session_state.active_hasta = dict(hasta_bilgi)   # açık rapor bu kimliğe ait
                     status.update(label="✅ Analiz tamamlandı!", state="complete")
 
             finally:
@@ -693,7 +701,7 @@ with col1:
             st.text_area("", st.session_state.rapor, height=400)
 
             # PDF indir
-            pdf_buffer = create_pdf(st.session_state.rapor, st.session_state.hasta_bilgi)
+            pdf_buffer = create_pdf(st.session_state.rapor, st.session_state.active_hasta or st.session_state.hasta_bilgi)
             st.download_button(
                 label="📄 PDF İndir",
                 data=pdf_buffer,
@@ -704,12 +712,13 @@ with col1:
         with tab2:
             st.subheader("📈 Boylamsal Tedavi Yanıt Analizi")
             
-            # Tüm geçmiş taramaları çek (şu anki dahil) — aynı organ (C14/C15)
-            patient_history = get_patient_history(st.session_state.hasta_bilgi.get("tc"),
+            # Tüm geçmiş taramaları çek — açık kimlik + aynı organ (C14/C15/#2)
+            _ah = st.session_state.active_hasta or st.session_state.hasta_bilgi
+            patient_history = get_patient_history(_ah.get("tc"),
                                                   organ=(st.session_state.bulgular or {}).get("organ"))
             
             # Şu anki taramayı geçmişe dahil değilse ekle
-            current_date = st.session_state.hasta_bilgi.get("tarih") or "Güncel"
+            current_date = _ah.get("tarih") or "Güncel"
             has_current = any(h["tarih"] == current_date for h in patient_history)
             
             all_scans = list(patient_history)
@@ -854,10 +863,11 @@ with col2:
                 with st.chat_message("user"):
                     st.write(soru)
 
-            # Cevap üret
-            # Aynı organ + kimlik-süzmeli; serbest-metin rapor gönderilmez (C24)
+            # Cevap üret — AÇIK rapor kimliği (form taslağı değil), aynı organ,
+            # kimlik-süzmeli; serbest-metin rapor gönderilmez (C24/#2)
+            _ah = st.session_state.active_hasta or st.session_state.hasta_bilgi
             patient_history = get_patient_history(
-                st.session_state.hasta_bilgi.get("tc"),
+                _ah.get("tc"),
                 organ=(st.session_state.bulgular or {}).get("organ"))
             gecmis_str = ""
             if patient_history:
@@ -880,12 +890,12 @@ RAPOR:
                 with st.chat_message("assistant"):
                     st.write(cevap)
 
-            # Chat geçmişi güncellendi, kaydet
+            # Chat geçmişi güncellendi, AÇIK kimlikle ve mevcut dosyaya kaydet (#2)
             if st.session_state.current_patient_file:
                 save_patient(
-                    st.session_state.hasta_bilgi, 
-                    st.session_state.bulgular, 
-                    st.session_state.rapor, 
+                    st.session_state.active_hasta or st.session_state.hasta_bilgi,
+                    st.session_state.bulgular,
+                    st.session_state.rapor,
                     st.session_state.chat_history,
                     st.session_state.current_patient_file
                 )

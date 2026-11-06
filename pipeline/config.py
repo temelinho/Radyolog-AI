@@ -85,8 +85,14 @@ class SegmentationConfig:
     folds: tuple[int, ...] = (0, 1, 2, 3, 4)   # 5-fold ensemble; tek fold DEĞİL
     configuration: str = "3d_fullres"
     tta: bool = True
-    # nnU-Net yürütülebiliri: env > PATH'teki komut. Sabit Windows yolu YOK (F11).
-    nnunet_cmd: str = os.environ.get("NNUNET_PREDICT", "nnUNetv2_predict")
+    # nnU-Net sürümü: Zenodo MSD ağırlıkları (DOI 10.5281/zenodo.4485926) v1'dir.
+    # v2 kullanılıyorsa env NNUNET_VERSION=v2 + task yerine Dataset id verilmeli.
+    nnunet_version: str = os.environ.get("NNUNET_VERSION", "v1")
+    # Yürütülebilir: env > PATH'teki komut. Sabit Windows yolu YOK (F11).
+    # v1: nnUNet_predict (-t task) · v2: nnUNetv2_predict (-d dataset)
+    nnunet_cmd: str = os.environ.get(
+        "NNUNET_PREDICT",
+        "nnUNet_predict" if os.environ.get("NNUNET_VERSION", "v1") == "v1" else "nnUNetv2_predict")
     totalseg_cmd: str = os.environ.get("TOTALSEG_CMD", "TotalSegmentator")
     totalseg_roi: tuple[str, ...] = ("aorta", "portal_vein_and_splenic_vein",
                                      "inferior_vena_cava")

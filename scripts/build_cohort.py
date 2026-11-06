@@ -13,7 +13,11 @@ Kullanım:
 JSON biçimi: {"POS": [...sid...], "NEG": [...sid...]}
 """
 
+import os
 import sys
+
+# Repo kökünü yola ekle: 'python scripts/build_cohort.py' her yerden çalışsın (#5)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline import manifest as man
 from pipeline.config import LAYOUT
@@ -37,14 +41,14 @@ def main(argv: list[str]) -> int:
 
     rapor = man.validate(all_cases)
     if rapor["patient_cakisma"]:
-        print("⚠️ Aynı kişi birden çok task'ta (bağımsızlık notu):",
+        print("[UYARI] Ayni kisi birden cok task'ta (bagimsizlik notu):",
               list(rapor["patient_cakisma"].keys()))
     if rapor["tekrar_key"]:
-        print("⚠️ Tekrar eden study:task:", rapor["tekrar_key"])
+        print("[UYARI] Tekrar eden study:task:", rapor["tekrar_key"])
 
     out = LAYOUT.manifest
     man.save_csv(all_cases, out)
-    print(f"✅ Manifest yazıldı: {out} | toplam {rapor['toplam']} | grup {rapor['grup']}")
+    print(f"[OK] Manifest yazildi: {out} | toplam {rapor['toplam']} | grup {rapor['grup']}")
     return 0
 
 
