@@ -21,9 +21,11 @@ import datetime
 # ============================================================
 # KONFIGURASYON
 # ============================================================
-RESULTS_FOLDER = r"C:\Users\ASUS\PycharmProjects\TemelProje\nnUNet_results"
-NNUNET_RAW = r"C:\Users\ASUS\PycharmProjects\TemelProje\nnUNet_raw"
-NNUNET_PREPROCESSED = r"C:\Users\ASUS\PycharmProjects\TemelProje\nnUNet_preprocessed"
+# Ortak çekirdek (tek kaynak ölçüm/kural/rapor/segmentasyon) — C9/F11
+from pipeline import config as pcfg, imaging, measurements, reporting, segmentation
+RESULTS_FOLDER = str(pcfg.LAYOUT.nnunet_results)
+NNUNET_RAW = os.environ.get("nnUNet_raw_data_base", str(pcfg.LAYOUT.base / "nnUNet_raw"))
+NNUNET_PREPROCESSED = os.environ.get("nnUNet_preprocessed", str(pcfg.LAYOUT.base / "nnUNet_preprocessed"))
 # API anahtarlari ve LLM ayarlari (.env / ortam degiskeninden okunur, koda gomulmez)
 try:
     from dotenv import load_dotenv
@@ -33,7 +35,7 @@ except ImportError:
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-PATIENTS_DB_DIR = os.environ.get("PATIENTS_DB_DIR", r"C:\Users\ASUS\PycharmProjects\TemelProje\patients_db")
+PATIENTS_DB_DIR = os.environ.get("PATIENTS_DB_DIR", str(pcfg.LAYOUT.base / "patients_db"))
 
 # Kullanilabilir LLM modelleri (arayuzden secilir)
 LLM_MODELS = {
@@ -45,6 +47,14 @@ DEFAULT_LLM = "Claude Opus 4.8"
 ANONYMIZE_FOR_API = True
 
 os.makedirs(PATIENTS_DB_DIR, exist_ok=True)
+
+# API'ye gidecek dict'ten kimlik alanlarını çıkar (bulgular makine-üretimi;
+# kara liste yeterli ve klinik alanları korur) — C22/C23/F22
+_IDENTITY_KEYS = {"ad_soyad", "tc", "isim", "name", "hasta", "hasta_bilgi"}
+def _api_safe(d):
+    if not isinstance(d, dict):
+        return d
+    return {k: v for k, v in d.items() if k.lower() not in _IDENTITY_KEYS}
 
 
 def call_llm(system_prompt, user_prompt, model_label=DEFAULT_LLM, temperature=0.3, max_tokens=2500):
@@ -95,137 +105,104 @@ ORGAN_LABELS = {
 # YARDIMCI FONKSİYONLAR
 # ============================================================
 
+def _pipeline_task(task_id):
+    """App kısa id ('007') -> pipeline task adı ('Task007_Pancreas'). Yoksa aynen."""
+    for tname in pcfg.SEGMENTATION.organ_task.values():
+        if task_id in tname:
+            return tname
+    return task_id
+
 def run_nnunet(input_dir, output_dir, task_id):
-    env = os.environ.copy()
-    env['RESULTS_FOLDER'] = RESULTS_FOLDER
-    env['nnUNet_raw_data_base'] = NNUNET_RAW
-    env['nnUNet_preprocessed'] = NNUNET_PREPROCESSED
+    """5-fold nnU-Net (çekirdek). Sabit yol/tek-fold/sahte başarı yok (C8-C10).
 
-    # Tam yolu ver
-    nnunet_exe = r"C:\Users\ASUS\PycharmProjects\TemelProje\radyoloji_env_311\Scripts\nnUNet_predict.exe"
-
-    cmd = [
-        nnunet_exe,
-        '-i', input_dir,
-        '-o', output_dir,
-        '-t', task_id,
-        '-m', '3d_fullres',
-        '-f', '0',
-        '--num_threads_preprocessing', '1',
-        '--num_threads_nifti_save', '1',
-        '--overwrite_existing'
-    ]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    
-    # Windows/CUDA IPC kapanış uyarısı kaynaklı sahte exit-code hatalarını bypass etmek için dosya varlığını kontrol ediyoruz
-    expected_output = os.path.join(output_dir, "hasta_001.nii.gz")
-    return os.path.exists(expected_output) and os.path.getsize(expected_output) > 0
+    Dönüş: SegResult (status: success/failed). nnU-Net ortam değişkenleri
+    config'ten; yürütülebilir ve task adı config/env ile ayarlanır (Colab).
+    """
+    os.environ.setdefault("nnUNet_results", RESULTS_FOLDER)
+    os.environ.setdefault("nnUNet_raw", NNUNET_RAW)
+    os.environ.setdefault("nnUNet_preprocessed", NNUNET_PREPROCESSED)
+    return segmentation.run_nnunet(input_dir, output_dir, _pipeline_task(task_id))
 
 def run_totalsegmentator(input_path, output_dir):
-    ts_exe = r"C:\Users\ASUS\PycharmProjects\TemelProje\radyoloji_env_311\Scripts\TotalSegmentator.exe"
-    cmd = [
-        ts_exe,
-        '-i', input_path,
-        '-o', output_dir,
-        '--roi_subset', 'aorta', 'portal_vein_and_splenic_vein'
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.returncode == 0
+    """Damar segmentasyonu (çekirdek). Dönüş AÇIKÇA kullanılmalı (C11)."""
+    return segmentation.run_totalsegmentator(input_path, output_dir)
 
 def extract_metrics(mask_path, task_id, damar_dir=None):
-    mask = sitk.ReadImage(mask_path)
-    arr = sitk.GetArrayFromImage(mask)
-    spacing = mask.GetSpacing()
-    voxel_cm3 = (spacing[0] * spacing[1] * spacing[2]) / 1000
+    """Maskeden geometrik metrik — TEK tanım, pipeline çekirdeği (C1-C7).
 
+    Eski küre-eşdeğeri çap, global-merkez sarma açısı, grid-indeksli mesafe ve
+    uydurma faz/lokasyon kaldırıldı. Çıktı anahtarları korunur (arayüz uyumu),
+    ama değerler artık measure_case'ten gelir ve ölçülemeyenler None (0 değil).
+    """
     labels = ORGAN_LABELS[task_id]
+    organ_adi = labels["organ_adi"]
+    tvol = imaging.load_nifti(mask_path)
+    spacing = tvol.spacing
+
     bulgular = {
-        "organ": labels["organ_adi"],
-        "goruntuleme": "Portal venöz faz BT",
-        "slice_thickness_mm": round(spacing[2], 1),
-        "pixel_spacing_mm": round(spacing[0], 2)
+        "organ": organ_adi,
+        "goruntuleme": "bilinmiyor",            # faz metadata'sız doğrulanamaz (C6/F06)
+        "slice_thickness_mm": round(float(spacing[2]), 2),
+        "pixel_spacing_mm": round(float(spacing[0]), 2),
+        "pixel_spacing_y_mm": round(float(spacing[1]), 2),
+        "schema_version": pcfg.SCHEMA_VERSION,
     }
 
     if labels["organ"]:
-        organ_arr = (arr == labels["organ"])
-        bulgular["organ_hacmi_cm3"] = round(float(np.sum(organ_arr) * voxel_cm3), 2)
+        organ_vox = int(np.sum(np.asarray(tvol.data) == labels["organ"]))
+        bulgular["organ_hacmi_cm3"] = round(organ_vox * tvol.voxel_volume_mm3 / 1000.0, 2)
 
     if labels["tumor"]:
-        tumor_arr = (arr == labels["tumor"])
-        tumor_vol = float(np.sum(tumor_arr) * voxel_cm3)
-        bulgular["tumor_hacmi_cm3"] = round(tumor_vol, 2)
-        bulgular["tumor_cap_mm"] = round((tumor_vol * 6 / 3.14159) ** (1/3) * 10, 1)
-
-        if labels["organ"] and np.any(organ_arr) and np.any(tumor_arr):
-            pan_z = np.where(organ_arr)[0]
-            tum_z_center = center_of_mass(tumor_arr)[0]
-            relative_pos = (tum_z_center - pan_z.min()) / (pan_z.max() - pan_z.min() + 1e-6)
-            bulgular["tumor_lokasyon"] = "baş" if relative_pos < 0.4 else "gövde" if relative_pos < 0.7 else "kuyruk"
-
-        # Damar mesafesi
+        vessel_vols = {}
         if damar_dir:
-            aorta_path = os.path.join(damar_dir, 'aorta.nii.gz')
-            portal_path = os.path.join(damar_dir, 'portal_vein_and_splenic_vein.nii.gz')
+            amap = {"aorta": "aorta.nii.gz",
+                    "portal_ven": "portal_vein_and_splenic_vein.nii.gz"}
+            for vname, fn in amap.items():
+                vp = os.path.join(damar_dir, fn)
+                if os.path.exists(vp):
+                    vessel_vols[vname] = imaging.load_nifti(vp)
 
-            if os.path.exists(aorta_path):
-                aorta = sitk.GetArrayFromImage(sitk.ReadImage(aorta_path))
-                aorta_dist = distance_transform_edt(aorta == 0, sampling=spacing[::-1])
-                bulgular["aorta_mesafe_mm"] = round(float(aorta_dist[tumor_arr].min()), 2)
-                bulgular["aorta_sarma_derecesi"] = calculate_encasement(tumor_arr, aorta.astype(bool), spacing)
+        res = measurements.measure_case(tvol, organ_adi, vessel_vols,
+                                        tumor_label=labels["tumor"])
+        summ = res["summary"]
+        enb = summ.get("en_buyuk_cap_lezyon")
+        bulgular["lezyon_sayisi"] = summ.get("lezyon_sayisi")
+        bulgular["tumor_hacmi_cm3"] = summ.get("toplam_tumor_hacim_cm3")
+        bulgular["tumor_cap_mm"] = enb["cap_mm"] if isinstance(enb, dict) else None  # AKSİYEL (C1)
+        bulgular["en_buyuk_cap_lezyon"] = enb
+        bulgular["en_buyuk_hacim_lezyon"] = summ.get("en_buyuk_hacim_lezyon")
+        bulgular["tumor_lokasyon"] = None        # tahminî anatomik isim yazma (C3/F02)
+        bulgular["kalite_bayraklari"] = res.get("quality_flags")
+        bulgular["lezyon_sayisi_saglamlik"] = res.get("lezyon_sayisi_saglamlik")
+        # Damar — ölçülemeyen None (0 değil) (C7/F05)
+        for vname, vinfo in res["vessels"].items():
+            bulgular[f"{vname}_mesafe_mm"] = vinfo.get("mesafe_mm")
+            bulgular[f"{vname}_sarma_derecesi"] = vinfo.get("sarma_derece")
+        bulgular["damar"] = res["vessels"]
 
-            if os.path.exists(portal_path):
-                portal = sitk.GetArrayFromImage(sitk.ReadImage(portal_path))
-                portal_dist = distance_transform_edt(portal == 0, sampling=spacing[::-1])
-                bulgular["portal_ven_mesafe_mm"] = round(float(portal_dist[tumor_arr].min()), 2)
-                bulgular["portal_ven_sarma_derecesi"] = calculate_encasement(tumor_arr, portal.astype(bool), spacing)
-
-    bulgular["model"] = f"nnU-Net Task{task_id} (Isensee et al., Nature Methods 2021)"
+    bulgular["model"] = f"nnU-Net {task_id}, 5-fold (Isensee et al., Nat Methods 2021)"
     bulgular["model_agirlik"] = "Zenodo DOI: 10.5281/zenodo.4485926"
+    bulgular["damar_model"] = "TotalSegmentator"
     return bulgular
 
-def calculate_encasement(tumor_mask, vessel_mask, spacing):
-    if not (np.any(tumor_mask) and np.any(vessel_mask)):
-        return 0.0
-    vessel_center = center_of_mass(vessel_mask)
-    vessel_dist = distance_transform_edt(vessel_mask == 0, sampling=spacing[::-1])
-    contact_voxels = np.argwhere((tumor_mask) & (vessel_dist < 2.0))
-    if len(contact_voxels) == 0:
-        return 0.0
-    angles = []
-    for voxel in contact_voxels:
-        dy = voxel[1] - vessel_center[1]
-        dx = voxel[2] - vessel_center[2]
-        angles.append(np.degrees(np.arctan2(dy, dx)))
-    angles = sorted(set([round(a, 0) for a in angles]))
-    if len(angles) < 2:
-        return 0.0
-    gaps = [angles[i+1] - angles[i] for i in range(len(angles)-1)]
-    gaps.append(360 - angles[-1] + angles[0])
-    return round(360 - max(gaps), 1)
-
 def recist_yanit(caplar_mm):
-    """RECIST 1.1'e gore tedavi yanitini dondurur.
-    caplar_mm: kronolojik sirali tumor caplari (mm); ilk eleman baslangic (baseline).
-    Referans: Eisenhauer et al., Eur J Cancer 2009;45:228-247 (RECIST 1.1).
-    Not: Cap, esdeger kure capidir (RECIST'in en uzun cap olcumunun yaklasigidir).
-    Doner: (etiket, kisaltma, stil)  stil: 'success'|'warning'|'info'
+    """Çap EĞİLİMİ göstergesi — doğrulanmamış; tam RECIST 1.1 DEĞİL (C16/C17).
+
+    Tam RECIST hedef lezyon eşleştirmesi, çap toplamı ve yeni lezyon
+    değerlendirmesi gerektirir; bu veriler yok. Bu yüzden CR/PR/SD/PD yerine
+    "eğilim" döneriz. Eksik/None çap 0 SAYILMAZ (C17); filtrelenir.
+    Doner: (etiket, kisaltma, stil) veya None.
     """
-    if not caplar_mm or len(caplar_mm) < 2:
+    gecerli = [float(c) for c in (caplar_mm or []) if c is not None and float(c) > 0]
+    if len(gecerli) < 2:
         return None
-    baseline = caplar_mm[0]
-    guncel = caplar_mm[-1]
-    nadir = min(caplar_mm)  # calismadaki en kucuk olcum (baseline dahil)
-    # Tam Yanit (CR): tumor tamamen kaybolmus
-    if guncel <= 0:
-        return ("Tam Yanıt (Complete Response, CR)", "CR", "success")
-    # Progresif Hastalik (PD): nadire gore >=%20 VE mutlak >=5 mm artis
+    baseline, guncel, nadir = gecerli[0], gecerli[-1], min(gecerli)
+    sfx = " (doğrulanmamış çap eğilimi, RECIST değil)"
     if nadir > 0 and (guncel - nadir) >= 5 and ((guncel - nadir) / nadir * 100) >= 20:
-        return ("Progresif Hastalık (Progressive Disease, PD)", "PD", "warning")
-    # Kismi Yanit (PR): baseline'a gore >=%30 azalma
+        return ("Progresyon eğilimi" + sfx, "PD?", "warning")
     if baseline > 0 and ((guncel - baseline) / baseline * 100) <= -30:
-        return ("Kısmi Yanıt (Partial Response, PR)", "PR", "success")
-    # Stabil Hastalik (SD)
-    return ("Stabil Hastalık (Stable Disease, SD)", "SD", "info")
+        return ("Gerileme eğilimi" + sfx, "PR?", "success")
+    return ("Stabil eğilim" + sfx, "SD?", "info")
 
 def generate_3d_visualization(mask_path, task_id, damar_dir=None):
     import SimpleITK as sitk
@@ -377,42 +354,28 @@ def generate_3d_visualization(mask_path, task_id, damar_dir=None):
     return fig
 
 def generate_report(bulgular, hasta_bilgi, gecmis_bulgular=None, model_label=DEFAULT_LLM):
-    system_prompt = """Sen 15 yıllık deneyimli bir abdominal radyologsun.
-Sana verilen BT segmentasyon bulgularını ACR ve ESR standartlarına uygun şekilde raporla.
-ÖNEMLİ KURALLAR:
-- Sadece verilen metriklere dayanarak rapor yaz.
-- Karaciğer ve Pankreas gibi tümörlü vakalarda tümör boyutuna göre T evrelemesi yap (T1: ≤2cm, T2: 2-4cm, T3: >4cm).
-- Vasküler temas varsa NCCN kriterlerine göre rezektabilite değerlendir (180° üzeri sarma lokal ileri/irresektabl anlamına gelir).
-- Eğer incelenen organ DALAK ise: Dalak hacmini klinik olarak derecelendir (Erişkin normal aralığı: 100-250 cm³). 250-500 cm³ arasını "hafif splenomegali", 500-1000 cm³ arasını "orta dereceli splenomegali", 1000 cm³ üzerini ise "masif splenomegali" olarak yorumla. Splenomegali saptanması durumunda portal hipertansiyon, karaciğer parankim hastalığı (siroz), lenfoproliferatif hastalıklar ve enfeksiyonlar yönünden klinik/laboratuvar korelasyonu öner.
-- Eğer incelenen organ AKCİĞER veya KOLON ise: Bulunan lezyon/tümör hacmi ve çapını klinik önemiyle yorumla (malignite şüphesi, takip veya histopatolojik korelasyon gereksinimi vb.).
-- EĞER GEÇMİŞ İNCELEME BULGULARI VERİLMİŞSE: Güncel bulgularla karşılaştır. Tümör hacminin yüzdesel değişimini hesapla (küçüldü mü, büyüdü mü). Tümör regresyonunu (küçülme/iyileşme), progresyonunu (büyüme/kötüleşme) veya stabil durumu belirt. Damar mesafelerindeki ve sarma derecelerindeki iyileşmeleri (örneğin "damarı artık sarmıyor", "portal ven ile mesafe açıldı" gibi) analiz et. Bunu "KARŞILAŞTIRMALI DEĞERLENDİRME" başlığı altında detaylandır ve "SONUÇ VE ÖNERİ" kısmında tedavi yanıtını (kısmi yanıt, progresyon, stabil) klinik dille yorumla.
-- Kesin tanı koyma, histopatolojik doğrulama önerilir de.
-- Raporu Türkçe yaz, kısa ve öz tut.
-- Markdown formatı KULLANMA, düz metin yaz.
-RAPOR YAPISI:
-1. TEKNİK
-2. BULGULAR
-3. KARŞILAŞTIRMALI DEĞERLENDİRME (Eğer geçmiş inceleme varsa)
-4. VASKÜLER DEĞERLENDİRME (varsa)
-5. EVRELEMESİ VE REZEKTABİLİTE (varsa)
-6. SONUÇ VE ÖNERİ"""
+    # Ortak çekirdek promptu (organ-özel kural, null'ı uydurma) + boylamsal ek (C25-C27)
+    system_prompt = reporting.SYSTEM_PROMPT + (
+        "\nGEÇMİŞ VARSA: Güncel bulguları geçmişle karşılaştır; hacim/çap "
+        "yüzdesel değişimini belirt; 'KARŞILAŞTIRMALI DEĞERLENDİRME' başlığı "
+        "ekle. Desteklenmeyen kesinlikte yorum yapma.")
 
-    # KVKK/gizlilik: API'ye kimlik gonderme, sadece tarih ve klinik metrikler
-    hasta_str = ""
-    if not ANONYMIZE_FOR_API:
-        if hasta_bilgi.get("ad_soyad"):
-            hasta_str += f"Hasta: {hasta_bilgi['ad_soyad']}\n"
-        if hasta_bilgi.get("tc"):
-            hasta_str += f"TC: {hasta_bilgi['tc']}\n"
-    if hasta_bilgi.get("tarih"):
-        hasta_str += f"Tarih: {hasta_bilgi['tarih']}\n"
+    # Kimlik süzmesi: ad/TC API'ye gitmez; geçmişin serbest-metin raporu da
+    # gönderilmez (yalnız tarih + klinik bulgular) (C23/C24/F22)
+    temiz_bulgular = _api_safe(bulgular)
+    hasta_str = f"Tarih: {hasta_bilgi['tarih']}\n" if hasta_bilgi.get("tarih") else ""
 
     gecmis_str = ""
     if gecmis_bulgular:
-        gecmis_str = "\n\nHastanın Geçmiş BT İnceleme Bulguları (Kronolojik Sırayla):\n" + json.dumps(gecmis_bulgular, ensure_ascii=False, indent=2)
+        temiz_gecmis = [{"tarih": g.get("tarih"),
+                         "bulgular": _api_safe(g.get("bulgular", {}))}
+                        for g in gecmis_bulgular if isinstance(g, dict)]
+        gecmis_str = ("\n\nGeçmiş BT Bulguları (kronolojik):\n"
+                      + json.dumps(temiz_gecmis, ensure_ascii=False, indent=2))
 
-    prompt = f"{hasta_str}\nBT Segmentasyon Bulguları:\n{json.dumps(bulgular, ensure_ascii=False, indent=2)}{gecmis_str}\n\nLütfen standart ve karşılaştırmalı radyoloji raporu oluştur."
-
+    prompt = (f"{hasta_str}\nBT Segmentasyon Bulguları:\n"
+              + json.dumps(temiz_bulgular, ensure_ascii=False, indent=2)
+              + gecmis_str + "\n\nStandart ve karşılaştırmalı radyoloji raporu oluştur.")
     return call_llm(system_prompt, prompt, model_label=model_label, temperature=0.3)
 
 def create_pdf(rapor_text, hasta_bilgi):
@@ -472,15 +435,18 @@ def slugify(text):
     return text.translate(translation_table)
 
 def save_patient(hasta_bilgi, bulgular, rapor, chat_history, current_file=None):
+    import hashlib
     os.makedirs(PATIENTS_DB_DIR, exist_ok=True)
     if current_file and os.path.exists(os.path.join(PATIENTS_DB_DIR, current_file)):
         file_name = current_file
     else:
-        tc = hasta_bilgi.get("tc") or "BilinmeyenTC"
-        ad_soyad = slugify(hasta_bilgi.get("ad_soyad") or "Adsiz")
-        tarih_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_name = f"{tc}_{ad_soyad}_{tarih_str}".replace(" ", "_").replace("/", "-") + ".json"
-        
+        # Dosya adında PHI YOK: TC'nin pseudonim özeti + organ + zaman (C22/F22)
+        tc = str(hasta_bilgi.get("tc") or "anon")
+        pid = hashlib.sha1(tc.encode("utf-8")).hexdigest()[:10]
+        organ = slugify(str((bulgular or {}).get("organ") or "organ")).lower().replace(" ", "-")
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_name = f"{pid}_{organ}_{ts}.json"
+
     file_path = os.path.join(PATIENTS_DB_DIR, file_name)
     data = {
         "hasta_bilgi": hasta_bilgi,
@@ -489,8 +455,11 @@ def save_patient(hasta_bilgi, bulgular, rapor, chat_history, current_file=None):
         "chat_history": chat_history,
         "file_name": file_name
     }
-    with open(file_path, "w", encoding="utf-8") as f:
+    # Atomik: önce .tmp'ye yaz, sonra replace (yarıda kalırsa bozuk kayıt olmaz) (C20/F10)
+    tmp_path = file_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+    os.replace(tmp_path, file_path)
     return file_name
 
 def load_patient(file_name):
@@ -506,7 +475,12 @@ def get_saved_patients():
             patients.append(f)
     return patients
 
-def get_patient_history(tc, current_tarih=None):
+def get_patient_history(tc, current_tarih=None, organ=None):
+    """Aynı TC'nin geçmiş tetkikleri. organ verilirse SADECE o organ (C14/C15).
+
+    Böylece aynı kişinin karaciğer ve pankreas ölçümleri tek boylamsal seride
+    karışmaz.
+    """
     if not tc:
         return []
     history = []
@@ -517,15 +491,18 @@ def get_patient_history(tc, current_tarih=None):
                 data = load_patient(f)
                 patient_tc = data.get("hasta_bilgi", {}).get("tc")
                 patient_tarih = data.get("hasta_bilgi", {}).get("tarih")
-                # Aynı TC ve farklı tarih (veya tarih yoksa da al)
-                if str(patient_tc) == str(tc):
-                    if current_tarih and patient_tarih == current_tarih:
-                        continue
-                    history.append({
-                        "tarih": patient_tarih or "Bilinmeyen Tarih",
-                        "bulgular": data.get("bulgular", {}),
-                        "rapor": data.get("rapor", "")
-                    })
+                b = data.get("bulgular", {}) or {}
+                if str(patient_tc) != str(tc):
+                    continue
+                if organ and str(b.get("organ", "")).lower() != str(organ).lower():
+                    continue  # farklı organ karışmasın
+                if current_tarih and patient_tarih == current_tarih:
+                    continue
+                history.append({
+                    "tarih": patient_tarih or "Bilinmeyen Tarih",
+                    "bulgular": b,
+                    "rapor": data.get("rapor", "")
+                })
             except Exception:
                 continue
     # Tarihe göre sırala
@@ -656,44 +633,40 @@ with col1:
                     f.write(uploaded_bytes)
 
             try:
-                # 1. nnU-Net
                 with st.status("🔬 Segmentasyon yapılıyor...", expanded=True) as status:
-                    st.write("nnU-Net modeli çalışıyor...")
-                    success = run_nnunet(input_dir, output_dir, task_id)
-                    
-                    if not success:
-                        st.error("nnU-Net hatası!")
+                    # 1. nnU-Net (5-fold) — başarı AÇIKÇA denetlenir (C10)
+                    st.write("nnU-Net modeli çalışıyor (5-fold)...")
+                    seg = run_nnunet(input_dir, output_dir, task_id)
+                    if seg.status != pcfg.Status.SUCCESS:
+                        st.error(f"nnU-Net başarısız: {seg.detail.get('neden', '?')}")
                         st.stop()
-
-                    # 2. TotalSegmentator
-                    st.write("Damar segmentasyonu yapılıyor...")
-                    run_totalsegmentator(plain_path, damar_dir)
-
-                    # 3. Metrik çıkarımı
-                    st.write("Metrikler hesaplanıyor...")
                     mask_path = os.path.join(output_dir, "hasta_001.nii.gz")
-                    bulgular = extract_metrics(mask_path, task_id, damar_dir)
-                    st.session_state.bulgular = bulgular
+                    if not os.path.exists(mask_path):           # sabit ad yoksa ilk maske (C10)
+                        masks = seg.detail.get("maskeler") or []
+                        if not masks:
+                            st.error("Segmentasyon çıktısı bulunamadı."); st.stop()
+                        mask_path = masks[0]
 
-                    # 4. Rapor üretimi
+                    # 2. TotalSegmentator — dönüş AÇIKÇA kullanılır (C11)
+                    st.write("Damar segmentasyonu yapılıyor...")
+                    vseg = run_totalsegmentator(plain_path, damar_dir)
+                    if vseg.status != pcfg.Status.SUCCESS:
+                        st.warning(f"⚠️ Damar segmentasyonu eksik ({vseg.status}); "
+                                   "rapor damar değerlendirmesi olmadan üretilecek.")
+
+                    # 3. Metrik + 4. Rapor (yerel; session henüz güncellenmez) (C21)
+                    st.write("Metrikler hesaplanıyor...")
+                    bulgular = extract_metrics(mask_path, task_id, damar_dir)
                     st.write("Geçmiş incelemeler sorgulanıyor...")
-                    gecmis_bulgular = get_patient_history(hasta_bilgi.get("tc"), hasta_bilgi.get("tarih"))
-                    
+                    gecmis_bulgular = get_patient_history(hasta_bilgi.get("tc"), hasta_bilgi.get("tarih"), organ=bulgular.get("organ"))
                     st.write(f"Radyoloji raporu üretiliyor ({st.session_state.llm_model})...")
                     rapor = generate_report(bulgular, hasta_bilgi, gecmis_bulgular, model_label=st.session_state.llm_model)
-                    st.session_state.rapor = rapor
-                    st.session_state.chat_history = []
-                    
-                    # Sonucu Veritabanına Kaydet
+
+                    # 5. Kayıt (atomik) + maskeler
                     current_file = save_patient(hasta_bilgi, bulgular, rapor, [])
-                    st.session_state.current_patient_file = current_file
-                    
-                    # Maskeleri Kalıcı Olarak Kaydet (3D Rekonstrüksiyon için)
                     patient_mask_dir = os.path.join(PATIENTS_DB_DIR, current_file.replace(".json", "_masks"))
                     os.makedirs(patient_mask_dir, exist_ok=True)
                     shutil.copy(mask_path, os.path.join(patient_mask_dir, "segmentation.nii.gz"))
-                    
-                    # Damarları kopyala
                     aorta_src = os.path.join(damar_dir, "aorta.nii.gz")
                     portal_src = os.path.join(damar_dir, "portal_vein_and_splenic_vein.nii.gz")
                     if os.path.exists(aorta_src):
@@ -701,6 +674,11 @@ with col1:
                     if os.path.exists(portal_src):
                         shutil.copy(portal_src, os.path.join(patient_mask_dir, "portal_vein.nii.gz"))
 
+                    # Hepsi başarılı -> session state TEK SEFERDE (eski sonuç bozulmaz) (C21)
+                    st.session_state.bulgular = bulgular
+                    st.session_state.rapor = rapor
+                    st.session_state.chat_history = []
+                    st.session_state.current_patient_file = current_file
                     status.update(label="✅ Analiz tamamlandı!", state="complete")
 
             finally:
@@ -726,8 +704,9 @@ with col1:
         with tab2:
             st.subheader("📈 Boylamsal Tedavi Yanıt Analizi")
             
-            # Tüm geçmiş taramaları çek (şu anki dahil)
-            patient_history = get_patient_history(st.session_state.hasta_bilgi.get("tc"))
+            # Tüm geçmiş taramaları çek (şu anki dahil) — aynı organ (C14/C15)
+            patient_history = get_patient_history(st.session_state.hasta_bilgi.get("tc"),
+                                                  organ=(st.session_state.bulgular or {}).get("organ"))
             
             # Şu anki taramayı geçmişe dahil değilse ekle
             current_date = st.session_state.hasta_bilgi.get("tarih") or "Güncel"
@@ -758,56 +737,48 @@ with col1:
             if len(tumor_scans) > 1:
                 st.info("💡 Hastanın sistemde kayıtlı birden fazla taraması tespit edildi. Tedavi yanıt grafikleri ve karşılaştırma metrikleri aşağıdadır:")
                 
-                # Karşılaştırma kartları
+                # Karşılaştırma kartları — ölçülemeyen değer None (0 değil), çökmez (C7/C18)
                 prev_scan = tumor_scans[-2]
                 curr_scan = tumor_scans[-1]
-                
-                p_vol = prev_scan["bulgular"].get("tumor_hacmi_cm3", 0)
-                c_vol = curr_scan["bulgular"].get("tumor_hacmi_cm3", 0)
-                p_cap = prev_scan["bulgular"].get("tumor_cap_mm", 0)
-                c_cap = curr_scan["bulgular"].get("tumor_cap_mm", 0)
-                
-                vol_change = ((c_vol - p_vol) / p_vol * 100) if p_vol > 0 else 0
-                cap_change = ((c_cap - p_cap) / p_cap * 100) if p_cap > 0 else 0
-                
-                # RECIST 1.1'e gore tedavi yaniti (cap-temelli; baseline & nadir referansli)
-                caplar = [float(s2["bulgular"].get("tumor_cap_mm", 0) or 0) for s2 in tumor_scans]
-                baseline_cap = caplar[0]
-                nadir_cap = min(caplar)
+
+                def _n(x):
+                    return float(x) if isinstance(x, (int, float)) else None
+                def _fmt(v, unit, dec=1):
+                    return f"{v:.{dec}f} {unit}" if isinstance(v, (int, float)) else "ölçülemedi"
+                def _delta(v):
+                    return f"{v:+.1f}%" if isinstance(v, (int, float)) else "—"
+
+                p_vol, c_vol = _n(prev_scan["bulgular"].get("tumor_hacmi_cm3")), _n(curr_scan["bulgular"].get("tumor_hacmi_cm3"))
+                p_cap, c_cap = _n(prev_scan["bulgular"].get("tumor_cap_mm")), _n(curr_scan["bulgular"].get("tumor_cap_mm"))
+                vol_change = ((c_vol - p_vol) / p_vol * 100) if (p_vol and c_vol is not None and p_vol > 0) else None
+                cap_change = ((c_cap - p_cap) / p_cap * 100) if (p_cap and c_cap is not None and p_cap > 0) else None
+
+                # Çap EĞİLİMİ (doğrulanmamış, RECIST değil); eksik çap 0 sayılmaz (C16/C17)
+                caplar = [s2["bulgular"].get("tumor_cap_mm") for s2 in tumor_scans]
+                gecerli_cap = [float(c) for c in caplar if isinstance(c, (int, float)) and c > 0]
                 yanit = recist_yanit(caplar)
-                if yanit:
+                if yanit and len(gecerli_cap) >= 2:
                     etiket, _kisalt, stil = yanit
-                    baseline_degisim = ((c_cap - baseline_cap) / baseline_cap * 100) if baseline_cap > 0 else 0
+                    baseline_cap, nadir_cap, guncel_cap = gecerli_cap[0], min(gecerli_cap), gecerli_cap[-1]
+                    baseline_degisim = ((guncel_cap - baseline_cap) / baseline_cap * 100) if baseline_cap > 0 else 0
                     mesaj = (f"**{etiket}** — Başlangıca göre çap değişimi: %{baseline_degisim:+.1f} "
-                             f"(başlangıç {baseline_cap:.1f} mm, nadir {nadir_cap:.1f} mm, güncel {c_cap:.1f} mm).")
+                             f"(başlangıç {baseline_cap:.1f} mm, nadir {nadir_cap:.1f} mm, güncel {guncel_cap:.1f} mm).")
                     getattr(st, stil)(mesaj)
-                
-                # Metrik sütunları
+
                 m_col1, m_col2, m_col3 = st.columns(3)
                 with m_col1:
-                    st.metric(
-                        label="Tümör Hacmi (cm³)",
-                        value=f"{c_vol:.2f} cm³",
-                        delta=f"{vol_change:+.1f}%",
-                        delta_color="inverse"
-                    )
+                    st.metric(label="Tümör Hacmi (cm³)", value=_fmt(c_vol, "cm³", 2),
+                              delta=_delta(vol_change), delta_color="inverse")
                 with m_col2:
-                    st.metric(
-                        label="Tümör Çapı (mm)",
-                        value=f"{c_cap:.1f} mm",
-                        delta=f"{cap_change:+.1f}%",
-                        delta_color="inverse"
-                    )
+                    st.metric(label="Tümör Çapı (mm)", value=_fmt(c_cap, "mm", 1),
+                              delta=_delta(cap_change), delta_color="inverse")
                 with m_col3:
-                    p_port = prev_scan["bulgular"].get("portal_ven_sarma_derecesi", 0)
-                    c_port = curr_scan["bulgular"].get("portal_ven_sarma_derecesi", 0)
-                    port_diff = c_port - p_port
-                    st.metric(
-                        label="Portal Ven Sarma Derecesi",
-                        value=f"{c_port}°",
-                        delta=f"{port_diff:+.1f}°",
-                        delta_color="inverse"
-                    )
+                    p_port, c_port = _n(prev_scan["bulgular"].get("portal_ven_sarma_derecesi")), _n(curr_scan["bulgular"].get("portal_ven_sarma_derecesi"))
+                    port_diff = (c_port - p_port) if (c_port is not None and p_port is not None) else None
+                    st.metric(label="Portal Ven Sarma Derecesi",
+                              value=(f"{c_port:.0f}°" if c_port is not None else "ölçülemedi"),
+                              delta=(f"{port_diff:+.1f}°" if port_diff is not None else "—"),
+                              delta_color="inverse")
                 
                 # Çizgi Grafik
                 st.subheader("📊 Boylamsal Tümör Hacim Trendi")
@@ -884,10 +855,15 @@ with col2:
                     st.write(soru)
 
             # Cevap üret
-            patient_history = get_patient_history(st.session_state.hasta_bilgi.get("tc"))
+            # Aynı organ + kimlik-süzmeli; serbest-metin rapor gönderilmez (C24)
+            patient_history = get_patient_history(
+                st.session_state.hasta_bilgi.get("tc"),
+                organ=(st.session_state.bulgular or {}).get("organ"))
             gecmis_str = ""
             if patient_history:
-                gecmis_str = "\n\nHastanın Veritabanındaki Tüm Tetkik Geçmişi ve Bulguları:\n" + json.dumps(patient_history, ensure_ascii=False, indent=2)
+                temiz_gecmis = [{"tarih": h.get("tarih"), "bulgular": _api_safe(h.get("bulgular", {}))}
+                                for h in patient_history]
+                gecmis_str = "\n\nAynı organ tetkik geçmişi (klinik bulgular):\n" + json.dumps(temiz_gecmis, ensure_ascii=False, indent=2)
 
             system = f"""Sen 15 yıllık deneyimli bir abdominal radyologsun.
 Aşağıdaki raporu sen yazdın. Sorulara kısa, net ve klinik dilde cevap ver.

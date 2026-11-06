@@ -74,3 +74,6 @@ build/
 
 # Merlin veri seti (RUA - gizli, ASLA commit etme)
 merlin/
+
+# Pipeline çalışma kökü (Colab/Drive veya yerel) — veri/çıktı, commit edilmez
+radyolog_ai/
