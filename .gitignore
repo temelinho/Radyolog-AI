@@ -71,3 +71,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Merlin veri seti (RUA - gizli, ASLA commit etme)
+merlin/
