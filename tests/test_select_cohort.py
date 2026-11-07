@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 from select_cohort import classify_finding  # noqa: E402
 from finalize_cohort import finalize_from_rows  # noqa: E402
+from extract_diameters import extract_diameter  # noqa: E402
 
 
 class TestClassifyLiver(unittest.TestCase):
@@ -83,6 +84,26 @@ class TestFinalize(unittest.TestCase):
     def test_pool_short_warns(self):
         cases, _, uyari = finalize_from_rows(self.ROWS, "liver", target=20)
         self.assertTrue(any("POS" in u and "yetmedi" in u for u in uyari))
+
+
+class TestExtractDiameter(unittest.TestCase):
+    def test_x_notation_takes_longest(self):
+        cap, s = extract_diameter("There is a hepatic mass measuring 2.7 x 1.9 cm.", "liver")
+        self.assertEqual(cap, 27.0)              # 2.7 cm = 27 mm (en uzun eksen)
+        self.assertIn("mass", s.lower())
+
+    def test_mm(self):
+        cap, _ = extract_diameter("27 mm liver lesion in segment 7.", "liver")
+        self.assertEqual(cap, 27.0)
+
+    def test_pancreas_cm(self):
+        cap, _ = extract_diameter("Pancreatic adenocarcinoma, 3.5 cm in the head.", "pancreas")
+        self.assertEqual(cap, 35.0)
+
+    def test_none_when_no_measure(self):
+        cap, s = extract_diameter("The liver is normal and unremarkable.", "liver")
+        self.assertIsNone(cap)
+        self.assertEqual(s, "")
 
 
 if __name__ == "__main__":
