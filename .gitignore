@@ -77,3 +77,10 @@ merlin/
 
 # Pipeline çalışma kökü (Colab/Drive veya yerel) — veri/çıktı, commit edilmez
 radyolog_ai/
+
+# Kohort seçim çıktıları (rapor metni/PHI içerebilir — ASLA commit etme)
+onay_*.csv
+akis_*.csv
+provenance_*.json
+*_cases.json
+reference_gt.csv
