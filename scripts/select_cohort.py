@@ -27,20 +27,22 @@ import re
 import sys
 from pathlib import Path
 
-TERMS_VERSION = "1.0.0"
+TERMS_VERSION = "1.1.0"   # kullanıcı geri bildirimiyle precision iyileştirildi
 TERMS = {
     "liver": {
         "organ": r"hepatic|liver|karaciğer",
         "malign": r"mass|metastas|hcc|hepatocellular|tumou?r|neoplasm|malignan|carcinoma",
-        "benign": r"cyst|h[ae]mangioma|hamartoma",
+        "benign": r"cyst|h[ae]mangioma|hamartoma|fnh|focal nodular hyperplasia",
     },
     "pancreas": {
         "organ": r"pancrea|pankreas",
         "malign": r"mass|adenocarcinoma|tumou?r|neoplasm|carcinoma|cancer|malignan",
-        "benign": r"cyst|ipmn|pseudocyst",
+        "benign": r"cyst|ipmn|pseudocyst|cystadenoma|serous",
     },
 }
-HEDGE = r"cannot exclude|indeterminate|too small to characteri|follow[- ]?up|nonspecific|equivocal|possible|cannot be excluded"
+# Malign terim geçse de bunlar varsa KANSER DEĞİL -> POS sayma (kullanıcı geri bildirimi):
+NONMALIG = r"abscess|steatos|fatty|atroph|post[- ]?op|post[- ]?surg|postsurg|resect|lipoma|inflammat|pancreatitis"
+HEDGE = r"cannot exclude|indeterminate|too small to characteri|follow[- ]?up|nonspecific|equivocal|possible|cannot be excluded|not characteri"
 NORMAL = r"normal|unremarkable|no focal|no suspicious|within normal limits|no evidence of (mass|lesion|tumou?r)"
 NEG_BEFORE = r"(no|without|negative for|absence of|no evidence of|free of)\s+\w*\s*$"
 
@@ -66,6 +68,8 @@ def classify_finding(text: str, organ: str) -> tuple[str, str]:
         if m:
             if _negated(s, m):
                 has_normal = True
+            elif re.search(NONMALIG, sl) or re.search(t["benign"], sl):
+                has_benign = True   # kitle var ama açıklaması benign (apse/yağ/atrofi/kist) → NEG
             elif hedged:
                 has_hedge = True
             else:

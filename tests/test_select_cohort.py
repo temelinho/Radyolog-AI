@@ -52,6 +52,12 @@ class TestClassifyPancreas(unittest.TestCase):
         self.assertEqual(self.c("Pancreatic mass, indeterminate, recommend MRI correlation."),
                          "INDETERMINATE")
 
+    def test_benign_explainer_not_pos(self):
+        # Kitle terimi geçse de apse/yağ/atrofi açıklaması → POS değil (kullanıcı geri bildirimi)
+        self.assertNotEqual(self.c("Pancreatic mass, likely an abscess."), "POS")
+        self.assertNotEqual(self.c("Fatty infiltration of the pancreas, no discrete mass."), "POS")
+        self.assertNotEqual(self.c("Pancreatic atrophy; mass not identified."), "POS")
+
 
 class TestFinalize(unittest.TestCase):
     ROWS = [
