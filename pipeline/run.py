@@ -9,7 +9,8 @@ bulgular" adımı GPU'suz çalışır ve test edilir.
 
 from __future__ import annotations
 
-import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -52,26 +53,28 @@ def segment_case(case: man.Case, work_dir: Path) -> dict[str, Any]:
     'masks[0]' ile DEĞİL, beklenen '<study_id>.nii.gz' adıyla seçilir — böylece
     başka vakanın maskesi seçilemez. Damar da AYNI vakanın BT'sinden üretilir.
     """
-    import shutil
-    task = SEGMENTATION.organ_task.get(case.organ, case.task)
-    work_dir = Path(work_dir)
-    in_dir = work_dir / "in"
-    in_dir.mkdir(parents=True, exist_ok=True)
-    mask_dir = work_dir / "masks"
-    vessel_dir = work_dir / "vessels"
-
+    task = case.task or SEGMENTATION.organ_task.get(case.organ, "")
     if not case.input_path or not Path(case.input_path).exists():
         return {"status": Status.FAILED, "detail": {"neden": "girdi_yok", "path": case.input_path}}
+    work_dir.mkdir(parents=True, exist_ok=True)
+    attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=work_dir))
+    in_dir = attempt_dir / "in"
+    in_dir.mkdir()
+    mask_dir = attempt_dir / "masks"
+    vessel_dir = attempt_dir / "vessels"
     staged = in_dir / f"{case.study_id}_0000.nii.gz"   # tek vaka, nnU-Net adlandırması
     shutil.copy(case.input_path, staged)
 
-    seg = segmentation.run_nnunet(str(in_dir), str(mask_dir), task)
+    try:
+        seg = segmentation.run_nnunet(str(in_dir), str(mask_dir), task)
+    finally:
+        staged.unlink(missing_ok=True)
     if seg.status != Status.SUCCESS:
         return {"status": Status.FAILED, "detail": seg.detail}
     mask_path = mask_dir / f"{case.study_id}.nii.gz"   # beklenen çıktı; masks[0] DEĞİL
-    if not mask_path.exists():
+    if not segmentation.is_readable_mask(mask_path):
         return {"status": Status.FAILED,
-                "detail": {"neden": "beklenen_maske_yok", "beklenen": str(mask_path)}}
+                "detail": {"neden": "beklenen_maske_gecersiz", "beklenen": str(mask_path)}}
     vseg = segmentation.run_totalsegmentator(case.input_path, str(vessel_dir))
     return {"status": Status.SUCCESS, "mask_path": str(mask_path),
             "vessel_dir": str(vessel_dir) if vseg.status == Status.SUCCESS else None,
@@ -81,8 +84,9 @@ def segment_case(case: man.Case, work_dir: Path) -> dict[str, Any]:
 def process_case(case: man.Case, do_segment: bool = True,
                  work_dir: Path | None = None) -> tuple[dict | None, str]:
     """Bir vakanın bulgularını üretir. do_segment=False ise maskeler hazır varsayılır."""
-    work_dir = work_dir or (LAYOUT.base / "work" / case.study_id)
     if do_segment:
+        task = case.task or SEGMENTATION.organ_task.get(case.organ, "")
+        work_dir = work_dir or (LAYOUT.base / "work" / f"{case.study_id}__{task}")
         seg = segment_case(case, Path(work_dir))
         if seg["status"] != Status.SUCCESS:
             return None, Status.FAILED
@@ -105,7 +109,7 @@ def run_all(manifest_path: str | None = None, do_segment: bool = True) -> dict[s
     LAYOUT.findings.mkdir(parents=True, exist_ok=True)
     ok = fail = cached = 0
     for case in cases:
-        task = SEGMENTATION.organ_task.get(case.organ, case.task)
+        task = case.task or SEGMENTATION.organ_task.get(case.organ, "")
         key = runner.cache_key(input_hash=case.input_hash or case.study_id,
                                extra={"task": task, "mod": "seg" if do_segment else "premask"})
         out = LAYOUT.findings / f"{case.study_id}__{task}.json"

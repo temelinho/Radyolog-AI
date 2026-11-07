@@ -21,17 +21,14 @@ import datetime
 # ============================================================
 # KONFIGURASYON
 # ============================================================
-# Ortak çekirdek (tek kaynak ölçüm/kural/rapor/segmentasyon) — C9/F11
-from pipeline import config as pcfg, imaging, measurements, reporting, segmentation
-RESULTS_FOLDER = str(pcfg.LAYOUT.nnunet_results)
-NNUNET_RAW = os.environ.get("nnUNet_raw_data_base", str(pcfg.LAYOUT.base / "nnUNet_raw"))
-NNUNET_PREPROCESSED = os.environ.get("nnUNet_preprocessed", str(pcfg.LAYOUT.base / "nnUNet_preprocessed"))
 # API anahtarlari ve LLM ayarlari (.env / ortam degiskeninden okunur, koda gomulmez)
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
+
+from pipeline import config as pcfg, imaging, measurements, reporting, segmentation
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -107,6 +104,8 @@ ORGAN_LABELS = {
 
 def _pipeline_task(task_id):
     """App kısa id ('007') -> pipeline task adı ('Task007_Pancreas'). Yoksa aynen."""
+    if pcfg.SEGMENTATION.nnunet_version == "v2":
+        return task_id
     for tname in pcfg.SEGMENTATION.organ_task.values():
         if task_id in tname:
             return tname
@@ -118,9 +117,6 @@ def run_nnunet(input_dir, output_dir, task_id):
     Dönüş: SegResult (status: success/failed). nnU-Net ortam değişkenleri
     config'ten; yürütülebilir ve task adı config/env ile ayarlanır (Colab).
     """
-    os.environ.setdefault("nnUNet_results", RESULTS_FOLDER)
-    os.environ.setdefault("nnUNet_raw", NNUNET_RAW)
-    os.environ.setdefault("nnUNet_preprocessed", NNUNET_PREPROCESSED)
     return segmentation.run_nnunet(input_dir, output_dir, _pipeline_task(task_id))
 
 def run_totalsegmentator(input_path, output_dir):
@@ -489,8 +485,9 @@ def get_patient_history(tc, current_tarih=None, organ=None):
         if f.endswith(".json"):
             try:
                 data = load_patient(f)
-                patient_tc = data.get("hasta_bilgi", {}).get("tc")
-                patient_tarih = data.get("hasta_bilgi", {}).get("tarih")
+                patient = data.get("hasta_bilgi") or {}
+                patient_tc = patient.get("tc")
+                patient_tarih = patient.get("tarih")
                 b = data.get("bulgular", {}) or {}
                 if str(patient_tc) != str(tc):
                     continue
@@ -565,12 +562,12 @@ with st.sidebar:
         if selected_patient_file != "Seçiniz...":
             if st.button("📂 Seçili Hastayı Yükle", use_container_width=True):
                 data = load_patient(selected_patient_file)
-                st.session_state.hasta_bilgi = data.get("hasta_bilgi", {})
+                st.session_state.hasta_bilgi = dict(data.get("hasta_bilgi") or {})
                 st.session_state.bulgular = data.get("bulgular")
                 st.session_state.rapor = data.get("rapor")
                 st.session_state.chat_history = data.get("chat_history", [])
-                st.session_state.current_patient_file = data.get("file_name", selected_patient_file)
-                st.session_state.active_hasta = data.get("hasta_bilgi", {})  # açık rapor bu kimliğe ait (#2)
+                st.session_state.current_patient_file = selected_patient_file
+                st.session_state.active_hasta = dict(data.get("hasta_bilgi") or {})  # açık rapor bu kimliğe ait (#2)
                 st.success("Hasta başarıyla yüklendi!")
     else:
         st.info("Kayıtlı hasta bulunamadı.")
@@ -646,11 +643,9 @@ with col1:
                         st.error(f"nnU-Net başarısız: {seg.detail.get('neden', '?')}")
                         st.stop()
                     mask_path = os.path.join(output_dir, "hasta_001.nii.gz")
-                    if not os.path.exists(mask_path):           # sabit ad yoksa ilk maske (C10)
-                        masks = seg.detail.get("maskeler") or []
-                        if not masks:
-                            st.error("Segmentasyon çıktısı bulunamadı."); st.stop()
-                        mask_path = masks[0]
+                    if not segmentation.is_readable_mask(mask_path):
+                        st.error("Beklenen segmentasyon maskesi okunamadı.")
+                        st.stop()
 
                     # 2. TotalSegmentator — dönüş AÇIKÇA kullanılır (C11)
                     st.write("Damar segmentasyonu yapılıyor...")
@@ -701,7 +696,7 @@ with col1:
             st.text_area("", st.session_state.rapor, height=400)
 
             # PDF indir
-            pdf_buffer = create_pdf(st.session_state.rapor, st.session_state.active_hasta or st.session_state.hasta_bilgi)
+            pdf_buffer = create_pdf(st.session_state.rapor, st.session_state.active_hasta or {})
             st.download_button(
                 label="📄 PDF İndir",
                 data=pdf_buffer,
@@ -713,7 +708,7 @@ with col1:
             st.subheader("📈 Boylamsal Tedavi Yanıt Analizi")
             
             # Tüm geçmiş taramaları çek — açık kimlik + aynı organ (C14/C15/#2)
-            _ah = st.session_state.active_hasta or st.session_state.hasta_bilgi
+            _ah = st.session_state.active_hasta or {}
             patient_history = get_patient_history(_ah.get("tc"),
                                                   organ=(st.session_state.bulgular or {}).get("organ"))
             
@@ -865,7 +860,7 @@ with col2:
 
             # Cevap üret — AÇIK rapor kimliği (form taslağı değil), aynı organ,
             # kimlik-süzmeli; serbest-metin rapor gönderilmez (C24/#2)
-            _ah = st.session_state.active_hasta or st.session_state.hasta_bilgi
+            _ah = st.session_state.active_hasta or {}
             patient_history = get_patient_history(
                 _ah.get("tc"),
                 organ=(st.session_state.bulgular or {}).get("organ"))
@@ -891,9 +886,9 @@ RAPOR:
                     st.write(cevap)
 
             # Chat geçmişi güncellendi, AÇIK kimlikle ve mevcut dosyaya kaydet (#2)
-            if st.session_state.current_patient_file:
+            if st.session_state.current_patient_file and st.session_state.active_hasta is not None:
                 save_patient(
-                    st.session_state.active_hasta or st.session_state.hasta_bilgi,
+                    st.session_state.active_hasta,
                     st.session_state.bulgular,
                     st.session_state.rapor,
                     st.session_state.chat_history,

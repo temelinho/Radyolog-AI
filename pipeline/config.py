@@ -23,7 +23,7 @@ from pathlib import Path
 # Sürümler — şema/kod/prompt değişince ARTIRILIR (cache + provenance) (F10).
 # ---------------------------------------------------------------------------
 SCHEMA_VERSION = "2.0.0"
-PIPELINE_VERSION = "2.0.0"
+PIPELINE_VERSION = "2.0.1"
 PROMPT_VERSION = "2.0.0"
 
 

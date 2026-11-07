@@ -19,6 +19,7 @@ edilebilir (alt fonksiyonlar saf).
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,43 +31,78 @@ from .config import SEGMENTATION, LAYOUT, Status
 # ---------------------------------------------------------------------------
 # Saf (test edilebilir) yardımcılar
 # ---------------------------------------------------------------------------
+def _results_env_key() -> str:
+    return "RESULTS_FOLDER" if SEGMENTATION.nnunet_version == "v1" else "nnUNet_results"
+
+
+def _results_root(results_dir: Path | None) -> Path:
+    return Path(results_dir or os.environ.get("NNUNET_RESULTS")
+                or os.environ.get(_results_env_key()) or LAYOUT.nnunet_results).resolve()
+
+
 def model_dir(task: str, results_dir: Path | None = None) -> Path:
-    base = Path(results_dir) if results_dir else LAYOUT.nnunet_results
-    return base / task
+    root = _results_root(results_dir)
+    configuration = SEGMENTATION.configuration
+    if SEGMENTATION.nnunet_version == "v1":
+        datasets = root / "nnUNet" / configuration
+        prefix = "Task"
+        model = "nnUNetTrainerV2__nnUNetPlansv2.1"
+    else:
+        datasets = root
+        prefix = "Dataset"
+        model = f"nnUNetTrainer__nnUNetPlans__{configuration}"
+        if task.startswith("Task") and task[4:7].isdigit():
+            task = task[4:7]
+    if task.isdigit():
+        matches = sorted(p for p in datasets.glob(f"{prefix}{int(task):03d}_*") if p.is_dir())
+        if len(matches) != 1:
+            raise ValueError(f"Model görevi {task}: {len(matches)} eşleşme ({datasets})")
+        task = matches[0].name
+    return datasets / task / model
 
 
 def check_folds_present(task: str, results_dir: Path | None = None,
                         folds: tuple[int, ...] | None = None) -> dict[str, Any]:
-    """5 fold ağırlığının VARLIĞINI doğrular (C8). Eksikse sessizce düşmez.
-
-    fold_X dizini görev klasörü altında HERHANGİ bir derinlikte aranır; böylece
-    v1 (…/TaskXXX/nnUNetTrainerV2__…/fold_X) ve v2 yapıları birlikte desteklenir.
-    Checkpoint: v2 '*checkpoint*.pth' veya v1 '*.model'.
-    """
+    """Çıkarımın kullanacağı tek model dizinindeki checkpoint'leri doğrula."""
     folds = SEGMENTATION.folds if folds is None else folds
-    md = model_dir(task, results_dir)
-    missing = []
-    for f in folds:
-        found = False
-        if md.exists():
-            for d in md.rglob(f"fold_{f}"):
-                if d.is_dir() and (any(d.glob("*checkpoint*")) or any(d.glob("*.model"))):
-                    found = True
-                    break
-        if not found:
-            missing.append(f)
-    return {"ok": len(missing) == 0, "eksik_foldlar": missing,
-            "beklenen": list(folds), "model_dir": str(md)}
+    try:
+        md = model_dir(task, results_dir)
+    except ValueError as exc:
+        return {"ok": False, "eksik_foldlar": list(folds), "model_hatasi": str(exc)}
+
+    def has_checkpoint(fold: int) -> bool:
+        folder = md / f"fold_{fold}"
+        if SEGMENTATION.nnunet_version == "v1":
+            return all((folder / f"model_final_checkpoint.{ext}").is_file()
+                       for ext in ("model", "model.pkl"))
+        return any((folder / f"checkpoint_final.{ext}").is_file()
+                   for ext in ("pth", "safetensors"))
+
+    missing = [fold for fold in folds if not has_checkpoint(fold)]
+    return {"ok": not missing, "eksik_foldlar": missing, "beklenen": list(folds),
+            "model_dir": str(md), "task": md.parent.name}
+
+
+def is_readable_mask(path: str | Path) -> bool:
+    from nibabel import load
+    from nibabel.filebasedimages import ImageFileError
+
+    try:
+        img = load(str(path))
+        return len(img.shape) == 3 and all(img.shape)
+    except (ImageFileError, OSError, ValueError):
+        return False
 
 
 def build_nnunet_command(input_dir: str, output_dir: str, task: str,
-                         cfg=SEGMENTATION) -> list[str]:
+                         cfg=None) -> list[str]:
     """nnU-Net çıkarım komutunu KURAR (5-fold). Tek fold bayrağı YOK (C8).
 
     v1: nnUNet_predict -t <task> -m <cfg>   ·   v2: nnUNetv2_predict -d <id> -c <cfg>
     (Zenodo MSD ağırlıkları v1; task adı 'Task003_Liver' gibi. v2 için dataset
     kimliği gerekir — NNUNET_VERSION=v2 ve task yerine Dataset id verilmeli.)
     """
+    cfg = SEGMENTATION if cfg is None else cfg
     folds = [str(f) for f in cfg.folds]
     if cfg.nnunet_version == "v1":
         cmd = [cfg.nnunet_cmd, "-i", str(input_dir), "-o", str(output_dir),
@@ -107,13 +143,20 @@ class SegResult:
 def run_nnunet(input_dir: str, output_dir: str, task: str,
                results_dir: Path | None = None, _runner=subprocess.run) -> SegResult:
     """5-fold nnU-Net çıkarımı. Fold eksikse veya çıkış kodu≠0 ise FAILED (C8/C10)."""
-    folds = check_folds_present(task, results_dir)
+    root = _results_root(results_dir)
+    folds = check_folds_present(task, root)
     if not folds["ok"]:
         return SegResult(Status.FAILED, None,
                          {"neden": "eksik_fold", **folds})
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    cmd = build_nnunet_command(input_dir, output_dir, task)
-    proc = _runner(cmd, capture_output=True, text=True)
+    cmd = build_nnunet_command(input_dir, output_dir, folds["task"])
+    env = os.environ.copy()
+    env[_results_env_key()] = str(root)
+    raw_key = "nnUNet_raw_data_base" if SEGMENTATION.nnunet_version == "v1" else "nnUNet_raw"
+    env.setdefault(raw_key, env.get("NNUNET_RAW") or str(LAYOUT.base / "nnUNet_raw"))
+    env.setdefault("nnUNet_preprocessed", env.get("NNUNET_PREPROCESSED")
+                   or str(LAYOUT.base / "nnUNet_preprocessed"))
+    proc = _runner(cmd, capture_output=True, text=True, env=env)
     if getattr(proc, "returncode", 1) != 0:
         return SegResult(Status.FAILED, None,
                          {"neden": "cikis_kodu", "returncode": proc.returncode,

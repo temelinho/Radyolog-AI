@@ -3,6 +3,8 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from dataclasses import replace
 
 from pipeline import segmentation as S
 from pipeline.config import Status, SEGMENTATION
@@ -15,11 +17,12 @@ class FakeProc:
 
 
 def _make_model(tmp, task, folds=(0, 1, 2, 3, 4)):
-    md = Path(tmp) / task
+    md = Path(tmp) / "nnUNet" / "3d_fullres" / task / "nnUNetTrainerV2__nnUNetPlansv2.1"
     for f in folds:
         d = md / f"fold_{f}"
         d.mkdir(parents=True)
-        (d / "checkpoint_final.pth").write_bytes(b"x")
+        (d / "model_final_checkpoint.model").write_bytes(b"x")
+        (d / "model_final_checkpoint.model.pkl").write_bytes(b"x")
     return Path(tmp)
 
 
@@ -43,6 +46,25 @@ class TestFoldCheckC8(unittest.TestCase):
         # -f 0 1 2 3 4 olmalı; tek fold DEĞİL (C8)
         i = cmd.index("-f")
         self.assertEqual(cmd[i + 1:i + 6], ["0", "1", "2", "3", "4"])
+
+    def test_v2_resolves_dataset_and_uses_same_results_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = replace(SEGMENTATION, nnunet_version="v2", nnunet_cmd="nnUNetv2_predict")
+            for fold in cfg.folds:
+                folder = root / "Dataset007_Pancreas" / "nnUNetTrainer__nnUNetPlans__3d_fullres" / f"fold_{fold}"
+                folder.mkdir(parents=True)
+                (folder / "checkpoint_final.pth").write_bytes(b"x")
+
+            def runner(cmd, **kwargs):
+                self.assertEqual(cmd[cmd.index("-d") + 1], "Dataset007_Pancreas")
+                self.assertEqual(kwargs["env"]["nnUNet_results"], str(root.resolve()))
+                return FakeProc(returncode=1)
+
+            with patch.object(S, "SEGMENTATION", cfg):
+                result = S.run_nnunet("in", str(root / "out"), "Task007_Pancreas",
+                                      results_dir=root, _runner=runner)
+            self.assertEqual(result.detail["neden"], "cikis_kodu")
 
 
 class TestRunNnunetC10(unittest.TestCase):
@@ -68,6 +90,8 @@ class TestRunNnunetC10(unittest.TestCase):
             out = Path(t) / "out"
 
             def runner(cmd, **k):
+                self.assertEqual(k["env"]["RESULTS_FOLDER"], str(res.resolve()))
+                self.assertEqual(cmd[cmd.index("-t") + 1], "Task003_Liver")
                 out.mkdir(parents=True, exist_ok=True)
                 (out / "vaka.nii.gz").write_bytes(b"m")
                 return FakeProc(returncode=0)
