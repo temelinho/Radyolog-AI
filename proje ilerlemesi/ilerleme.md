@@ -1,7 +1,7 @@
 # Proje İlerlemesi — Radyolog AI
 
-**Son güncelleme:** 8 Kasım 2026
-**Amaç:** Bu oturumda (6–8 Kasım 2026) baştan sona ne yaptığımızın detaylı, kronolojik kaydı. Nerede kaldığımız ve sıradaki adım da sonda.
+**Son güncelleme:** 10 Kasım 2026
+**Amaç:** Baştan sona ne yaptığımızın detaylı, kronolojik kaydı (6–10 Kasım 2026). Nerede kaldığımız ve sıradaki adım da sonda.
 
 ---
 
@@ -88,5 +88,40 @@ Abdominal BT'den otomatik çıkarılan geometrik tümör metrikleriyle (grounded
 - **PR #1** dalı: `claude/radyolog-ai-proje-dokumani-764226` (tüm iş burada, push'lu).
 - `master`: `158ece9` (merlin'siz temiz taban; pipeline PR merge edilince geçer).
 - **13 modül, 95 birim testi**, hepsi yeşil. Ağırlık/hasta verisi/API anahtarı GitHub'da **yok**.
+
+---
+
+## 13. Segmentasyon + ölçüm + açık modeller (9–10 Kasım)
+
+### 13.1 Kohort kesinleşti (80 vaka)
+- `kohort_80_liste.csv` → `liver_cases.json` (POS 20 / NEG 20) + `pancreas_cases.json` (POS 20 / NEG 20), `protocol/`'e yazıldı. Toplam **80 vaka**, çakışma yok.
+
+### 13.2 Colab'da segmentasyon (nnU-Net v1 5-fold + TotalSegmentator)
+Drive kökü `MyDrive/Radyolog-AI-2`. İlk gerçek koşuda üç tuzak çıktı ve çözüldü (detay: memory `colab-segmentasyon-tuzaklari`):
+1. **PyTorch 2.6 `weights_only`** → `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` (alt-süreç `os.environ.copy()` ile miras alır; Zenodo MSD ağırlığı güvenli).
+2. **CT yolu** `ct/merlinabdominalctdataset/merlin_data/<id>.nii.gz` (sadece `ct/` değil).
+3. **cases.json** protokolde yoktu → kohort listesinden türetildi.
+- **Bozuk/eksik CT:** 11 dosya 0-byte (bozuk indirme) + 4 hiç inmemiş = 15 CT; azcopy (container SAS, `--list-of-files`) ile yeniden indirildi (15 Done / 0 Failed, 2.1 GB).
+- **Drive I/O darboğazı:** TotalSegmentator Drive FUSE'da takılıyordu → CT'yi yerel SSD'ye (`/content`) stage'leyen sağlamlaştırılmış hücre. Asıl yavaşlık (~12–24 dk/vaka) ise gerçek nnU-Net 5-fold+TTA hesabı (T4 yeterli; çıkarım ~1.7 GB VRAM).
+- **Sonuç:** 75/80 maske + damar; son 5 (hepsi Pankreas) GPU boşalınca tamamlandı → **80/80**.
+
+### 13.3 Kaggle yedeği (Colab erişilemezken) — not
+- Colab Google-taraflı erişim sorunuyla bağlanamayınca Kaggle denendi. Kaggle **Drive'ı mount edemiyor** (`google.colab` yok) → CT'ler azcopy ile direkt Kaggle diskine. nnU-Net'in gömülü ağırlık linki **ölü** (Zenodo eski `/record/...?download=1` 404); çalışan link: `https://zenodo.org/api/records/4003545/files/Task007_Pancreas.zip/content`. Zenodo tek-bağlantı yavaş → aria2 çoklu-bağlantı. Colab geri gelince Kaggle bırakıldı; **akış Drive+Colab**.
+
+### 13.4 Ölçüm hücresi (GPU'suz)
+- `pipeline/run.py --no-segment`: maskelerden `bulgular.json` (aksiyel çap + hacim + damar mesafesi/sarma), atomik + cache'li. Manifest `manifest.from_pos_neg_json` ile `cohort.csv`. Lokalde doğrulandı (**100/100 test**, deps kurulu).
+
+### 13.5 Açık model çıkarımı çekirdeğe eklendi (commit 6aec73e)
+- `reporting.call_llm` `local_hf`: HF transformers **4-bit** (bnb nf4), chat template (gemma-2 için system-rolsüz fallback), kesik-yanıt tespiti; `_HF_CACHE` (bir kez yükle) + `free_hf_cache` (modeller arası VRAM boşalt). `HF_REPOS`: Qwen açık, Llama-3.1/gemma-2 kapılı (HF token + lisans).
+- `compare_llm`: `RADYOLOG_MODELS` env ile model seçimi (**Claude hariç** koşabilme). Hem rapor üretir hem `numeric_fidelity` (sayısal sadakat) değerlendirmesi yapar → `reports/` + `ozet.csv`.
+
+## 14. GÜNCEL NEREDE KALDIK (10 Kasım)
+1. ✅ 80/80 maske + damar Drive'da.
+2. ⏳ **Ölçüm:** Hücre A (manifest) → B (`run_all --no-segment`) → C (doğrulama) → 80 `bulgular.json`.
+3. ⏳ **Raporlama + değerlendirme (Claude hariç):** Gemini + Template + açık modeller (Qwen/Gemma/Llama, tek tek VRAM) → `reports/` + `ozet.csv`.
+4. ⬜ **Gerçek radyolog raporuyla kıyas:** `evaluation.py` + `matching.py` + `reference.py` (GT: `reference_gt.csv`/Merlin raporları).
+5. ⬜ Makale tabloları/şekiller.
+
+---
 
 *İlgili belgeler: `PROJE_TAM_DURUM.md`, `kod_zayifliklari.md`, `savunulabilirlik_notu.md`, `pipeline/README.md`.*
