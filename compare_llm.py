@@ -46,6 +46,17 @@ def _load_findings(path: str) -> dict | None:
 
 def main(dosyalar: list[str] | None = None) -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # Model seçimi: RADYOLOG_MODELS=Gemini,Qwen,Gemma,Llama,Template (Claude hariç gibi).
+    # Boşsa tüm MODELS koşar. Bilinmeyen etiket yok sayılır.
+    secili = os.environ.get("RADYOLOG_MODELS")
+    models = reporting.MODELS
+    if secili:
+        istenen = {s.strip() for s in secili.split(",") if s.strip()}
+        models = {k: v for k, v in reporting.MODELS.items() if k in istenen}
+        bilinmeyen = istenen - set(reporting.MODELS)
+        if bilinmeyen:
+            print(f"⚠️  Bilinmeyen model etiketi yok sayıldı: {sorted(bilinmeyen)}")
+    print(f"🧪 Koşulacak modeller: {list(models)}")
     if dosyalar:
         paths = [d if os.path.isabs(d) else os.path.join(FINDINGS_DIR, d) for d in dosyalar]
     else:
@@ -67,7 +78,7 @@ def main(dosyalar: list[str] | None = None) -> None:
         print(f"\n=== {ad} ({findings.get('organ', '?')}) ===")
         karsilastirma = {"hasta": ad, "bulgular": findings, "raporlar": {}, "sadakat": {}}
 
-        for etiket, cfg in reporting.MODELS.items():
+        for etiket, cfg in models.items():
             try:
                 resp = reporting.call_llm(cfg["provider"], cfg["model"],
                                           reporting.SYSTEM_PROMPT, prompt, findings=findings)

@@ -136,6 +136,49 @@ MODELS = {
     "Template": {"provider": "template", "model": "rule-based"},
 }
 
+# Açık model kısa adı -> HuggingFace repo kimliği (Colab 4-bit çıkarımı).
+# Llama-3.1 ve gemma-2 HF'de KAPILIDIR: lisans kabulü + `huggingface_hub.login`
+# gerekir. Qwen2.5 açıktır.
+HF_REPOS = {
+    "Qwen2.5-14B-Instruct": "Qwen/Qwen2.5-14B-Instruct",
+    "gemma-2-9b-it": "google/gemma-2-9b-it",
+    "Llama-3.1-8B-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
+}
+
+# Yüklenen model+tokenizer burada tutulur: 80 vakada TEKRAR TEKRAR yüklenmez.
+# Dikkat: her seferinde TEK açık model önbellekte olmalı (T4 16 GB VRAM); farklı
+# bir açık modele geçmeden önce `_HF_CACHE.clear()` + `torch.cuda.empty_cache()`.
+_HF_CACHE: dict[str, Any] = {}
+
+
+def _load_hf(model: str):
+    """HF modelini 4-bit yükle (bir kez), (tokenizer, model) döndür."""
+    if model in _HF_CACHE:
+        return _HF_CACHE[model]
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    repo = HF_REPOS.get(model, model)
+    bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                             bnb_4bit_compute_dtype=torch.float16,
+                             bnb_4bit_use_double_quant=True)
+    tok = AutoTokenizer.from_pretrained(repo)
+    mdl = AutoModelForCausalLM.from_pretrained(
+        repo, quantization_config=bnb, device_map="auto", torch_dtype=torch.float16)
+    _HF_CACHE[model] = (tok, mdl)
+    return tok, mdl
+
+
+def free_hf_cache() -> None:
+    """Açık model VRAM'ini boşalt (modeller arası geçişte çağrılır)."""
+    _HF_CACHE.clear()
+    try:
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
 
 @dataclass
 class LLMResponse:
@@ -193,8 +236,31 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
                            truncated=(fr is not None and "MAX_TOKENS" in fr.upper()))
 
     if provider == "local_hf":
-        raise NotImplementedError(
-            f"{model} açık model Colab (4-bit) ortamında çalıştırılır; "
-            "ortak şema/prompt aynıdır.")
+        import torch
+        tok, mdl = _load_hf(model)
+        messages = [{"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}]
+        try:
+            inputs = tok.apply_chat_template(
+                messages, add_generation_prompt=True, return_tensors="pt").to(mdl.device)
+        except Exception:
+            # Bazı şablonlar (ör. gemma-2) 'system' rolünü desteklemez: birleştir.
+            merged = system_prompt + "\n\n" + user_prompt
+            inputs = tok.apply_chat_template(
+                [{"role": "user", "content": merged}],
+                add_generation_prompt=True, return_tensors="pt").to(mdl.device)
+        in_len = inputs.shape[-1]
+        with torch.no_grad():
+            out = mdl.generate(inputs, max_new_tokens=max_tokens,
+                               do_sample=temperature > 0,
+                               temperature=max(temperature, 1e-5),
+                               pad_token_id=tok.eos_token_id)
+        gen = out[0][in_len:]
+        text = tok.decode(gen, skip_special_tokens=True)
+        truncated = int(gen.shape[-1]) >= max_tokens  # yeni token sınıra dayandıysa kesik
+        return LLMResponse(text, provider, model,
+                           finish_reason="length" if truncated else "stop",
+                           usage={"in": int(in_len), "out": int(gen.shape[-1])},
+                           truncated=truncated)
 
     raise ValueError(f"bilinmeyen sağlayıcı: {provider}")
