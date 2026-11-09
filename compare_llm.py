@@ -79,26 +79,42 @@ def main(dosyalar: list[str] | None = None) -> None:
         karsilastirma = {"hasta": ad, "bulgular": findings, "raporlar": {}, "sadakat": {}}
 
         for etiket, cfg in models.items():
-            try:
-                resp = reporting.call_llm(cfg["provider"], cfg["model"],
-                                          reporting.SYSTEM_PROMPT, prompt, findings=findings)
-            except NotImplementedError:
-                print(f"  ⏭️  {etiket}: açık model Colab'da çalışır, atlandı."); continue
-            except Exception as e:
-                print(f"  ❌ {etiket}: {e}"); continue
-            if not resp.is_valid():  # boş/kesik yanıt başarı sayılmaz (F19)
-                print(f"  ⚠️  {etiket}: geçersiz/kesik yanıt, atlandı."); continue
+            out_txt = os.path.join(OUTPUT_DIR, f"{ad}__{etiket}.txt")
+            # DEVAM ETTİRME: bu model+vaka zaten üretildiyse API'yi TEKRAR çağırma.
+            # Kota korunur (Gemini vb. günlük limit); kayıtlı metinden sadakat yeniden
+            # hesaplanır, böylece ozet.csv tam kalır. Yeniden-üretmek istersen .txt'yi sil.
+            cached = os.path.exists(out_txt) and os.path.getsize(out_txt) > 0
+            if cached:
+                with open(out_txt, "r", encoding="utf-8") as f:
+                    text = f.read()
+            else:
+                try:
+                    resp = reporting.call_llm(cfg["provider"], cfg["model"],
+                                              reporting.SYSTEM_PROMPT, prompt, findings=findings)
+                except NotImplementedError:
+                    print(f"  ⏭️  {etiket}: açık model Colab'da çalışır, atlandı."); continue
+                except Exception as e:
+                    print(f"  ❌ {etiket}: {e}"); continue
+                if not resp.is_valid():  # boş/kesik yanıt başarı sayılmaz (F19)
+                    print(f"  ⚠️  {etiket}: geçersiz/kesik yanıt, atlandı."); continue
+                text = resp.text
+                with open(out_txt, "w", encoding="utf-8") as f:
+                    f.write(text)
+                # Dakikalık limit (RPM) için API çağrıları arasına bekleme (saniye).
+                bekle = float(os.environ.get("RADYOLOG_LLM_DELAY", "0") or 0)
+                if bekle and cfg["provider"] in ("google", "anthropic"):
+                    import time
+                    time.sleep(bekle)
 
-            fid = evaluation.numeric_fidelity(resp.text, findings)  # bağlam+birim (C28)
-            karsilastirma["raporlar"][etiket] = resp.text
+            fid = evaluation.numeric_fidelity(text, findings)  # bağlam+birim (C28)
+            karsilastirma["raporlar"][etiket] = text
             karsilastirma["sadakat"][etiket] = fid.as_dict()
-            print(f"  ✅ {etiket}: sadakat {fid.supported}/{fid.total} (oran {fid.ratio})")
-
-            with open(os.path.join(OUTPUT_DIR, f"{ad}__{etiket}.txt"), "w", encoding="utf-8") as f:
-                f.write(resp.text)
+            print(f"  {'⏭️ mevcut' if cached else '✅'} {etiket}: "
+                  f"sadakat {fid.supported}/{fid.total} (oran {fid.ratio})")
             ozet.append({"hasta": ad, "organ": findings.get("organ", ""), "model": etiket,
                          "sadakat_gecen": fid.supported, "sadakat_toplam": fid.total,
-                         "oran": fid.ratio, "yontem": "otomatik-proxy"})
+                         "oran": fid.ratio,
+                         "yontem": "otomatik-proxy-cache" if cached else "otomatik-proxy"})
 
         with open(os.path.join(OUTPUT_DIR, f"{ad}__karsilastirma.json"), "w", encoding="utf-8") as f:
             json.dump(karsilastirma, f, ensure_ascii=False, indent=2)
