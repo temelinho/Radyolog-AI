@@ -31,6 +31,28 @@ AXIAL_AXIS = 2
 # ---------------------------------------------------------------------------
 # Lezyon ayrıştırma ve çap
 # ---------------------------------------------------------------------------
+def _extreme_points(phys: np.ndarray) -> np.ndarray:
+    """Dejenere (doğrusal) küme için çapı taşıyan uç noktalar (en çok 6 adet).
+
+    ConvexHull yalnız (yaklaşık) eşdoğrusal/dejenere kümelerde QhullError verir;
+    böyle bir kümede en uzak çift, baskın (PCA) yöndeki iki uç noktadır — bu O(n)
+    bulunur ve doğrusal küme için SONUÇ KESİNDİR. Böylece tüm noktalarda O(n²)
+    kaba-kuvvet bellek patlaması (büyük kesitte kilitlenme) önlenir.
+    """
+    if phys.shape[0] <= 2:
+        return phys
+    c = phys - phys.mean(axis=0)
+    try:
+        _, _, vt = np.linalg.svd(c, full_matrices=False)
+        proj = c @ vt[0]
+    except np.linalg.LinAlgError:
+        proj = c[:, 0]
+    idx = {int(proj.argmin()), int(proj.argmax()),
+           int(phys[:, 0].argmin()), int(phys[:, 0].argmax()),
+           int(phys[:, 1].argmin()), int(phys[:, 1].argmax())}
+    return phys[sorted(idx)]
+
+
 def _slice_longest_diameter_mm(points_ij: np.ndarray, sx: float, sy: float) -> float:
     """Tek kesitteki (i,j) piksel kümesinin en uzun kirişi (mm). Deterministik."""
     n = points_ij.shape[0]
@@ -39,7 +61,7 @@ def _slice_longest_diameter_mm(points_ij: np.ndarray, sx: float, sy: float) -> f
     if n == 1:
         return 0.0
     phys = points_ij.astype(float) * np.array([sx, sy])
-    # Önce konveks kabuk; başarısızsa/doğrusalsa tüm noktalarda kaba kuvvet.
+    # Önce konveks kabuk; başarısızsa/doğrusalsa uç noktalara indir (O(n²) kaçın).
     pts = phys
     try:
         from scipy.spatial import ConvexHull, QhullError
@@ -48,9 +70,9 @@ def _slice_longest_diameter_mm(points_ij: np.ndarray, sx: float, sy: float) -> f
                 hull = ConvexHull(phys)
                 pts = phys[hull.vertices]
             except QhullError:
-                pts = phys  # doğrusal/dejenere -> uç noktalar zaten pts içinde
+                pts = _extreme_points(phys)  # doğrusal/dejenere -> uç noktalar
     except Exception:
-        pts = phys
+        pts = _extreme_points(phys)
     # Kabuk köşeleri az sayıda; kaba kuvvet maksimum (deterministik).
     diff = pts[:, None, :] - pts[None, :, :]
     d2 = np.einsum("ijk,ijk->ij", diff, diff)
@@ -154,8 +176,14 @@ def vessel_wrap_angle_deg(tumor_mask: np.ndarray, vessel_mask: np.ndarray,
 
     Durumlar: ikisi de hiç birlikte görünmüyorsa not_assessed (açı None);
     birlikte var ama temas yoksa success + 0 derece.
+
+    Performans (K5): her damar sınır pikselinin en yakın tümör pikseline FİZİKSEL
+    mesafesi, kesit başına tümörün TÜM piksellerinden cKDTree kurmak yerine öklid
+    mesafe dönüşümü (EDT) ile bulunur. İki yöntem aynı 'en yakın piksel' öklid
+    mesafesini verir (SONUÇ AYNI), ama EDT O(H*W) C-hızındadır; zero-shot OOD
+    maskede oluşan geniş/yayılmış tümör bölgesinde kilitlenmeyi önler.
     """
-    from scipy.spatial import cKDTree
+    from scipy import ndimage
     contact = MEASUREMENT.vessel_contact_mm if contact_mm is None else contact_mm
     sx, sy, _ = spacing
     tumor_mask = np.asarray(tumor_mask) > 0
@@ -164,22 +192,24 @@ def vessel_wrap_angle_deg(tumor_mask: np.ndarray, vessel_mask: np.ndarray,
     if not vessel_mask.any():
         return {"sarma_derece": None, "status": Status.EMPTY_MASK, "research_grade": True}
 
+    # Yalnız HEM damar HEM tümör bulunan kesitlerde çalış (boş kesitleri gezme).
+    v_present = vessel_mask.any(axis=(0, 1))
+    t_present = tumor_mask.any(axis=(0, 1))
+    both = np.nonzero(v_present & t_present)[0]
+
     best_angle = 0.0
-    slices_both = 0
-    for k in range(vessel_mask.shape[AXIAL_AXIS]):
+    spacing_xy = np.array([sx, sy])
+    for k in both:
         v2 = np.take(vessel_mask, k, axis=AXIAL_AXIS)
         t2 = np.take(tumor_mask, k, axis=AXIAL_AXIS)
-        if not v2.any() or not t2.any():
-            continue
-        slices_both += 1
-        v_bound = _slice_boundary(v2).astype(float)
+        v_bound = _slice_boundary(v2)                      # (M,2) tam-sayı (i,j)
         if v_bound.shape[0] == 0:
             continue
-        v_phys = v_bound * np.array([sx, sy])
+        v_phys = v_bound.astype(float) * spacing_xy
         centroid = v_phys.mean(axis=0)  # YEREL merkez (bu kesit)
-        t_pts = np.argwhere(t2 > 0).astype(float) * np.array([sx, sy])
-        tree = cKDTree(t_pts)
-        dist, _ = tree.query(v_phys, k=1)
+        # EDT: her piksel -> en yakın tümör pikseline fiziksel mesafe (mm).
+        edt = ndimage.distance_transform_edt(~t2, sampling=(sx, sy))
+        dist = edt[v_bound[:, 0], v_bound[:, 1]]
         contact_pts = v_phys[dist <= contact]
         if contact_pts.shape[0] == 0:
             continue
@@ -188,10 +218,10 @@ def vessel_wrap_angle_deg(tumor_mask: np.ndarray, vessel_mask: np.ndarray,
         angle_span = _angular_coverage_deg(angles)
         best_angle = max(best_angle, angle_span)
 
-    if slices_both == 0:
+    if both.size == 0:
         return {"sarma_derece": None, "status": Status.NOT_ASSESSED, "research_grade": True}
     return {"sarma_derece": round(best_angle, 1), "status": Status.SUCCESS,
-            "research_grade": True, "temas_kesit_sayisi": slices_both}
+            "research_grade": True, "temas_kesit_sayisi": int(both.size)}
 
 
 def _angular_coverage_deg(angles: np.ndarray) -> float:
