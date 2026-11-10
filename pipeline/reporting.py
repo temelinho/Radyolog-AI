@@ -25,7 +25,9 @@ ALLOWED_FIELDS = {
     "lezyon_sayisi", "toplam_tumor_hacim_cm3",
     "en_buyuk_cap_lezyon", "en_buyuk_hacim_lezyon",
     "damar", "boyut_kategorisi", "vaskuler",
-    "schema_version", "model", "model_agirlik", "damar_model", "provenance",
+    "schema_version", "model", "model_agirlik", "damar_model",
+    # NOT: 'provenance' BİLEREK yok — maske yolu hasta study_id'si taşır ve dış
+    # LLM'e gitmemeli (RUA). Provenance tam bulgular.json'da yerelde kalır (F22).
 }
 
 SYSTEM_PROMPT = (

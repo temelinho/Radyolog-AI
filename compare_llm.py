@@ -40,6 +40,10 @@ def _load_findings(path: str) -> dict | None:
     findings = data.get("bulgular", data)
     if not isinstance(findings, dict):
         return None
+    # Geçerli bulgu şeması değilse atla (ör. '<ad>.json.meta.json' cache dosyası
+    # yalnız {"cache_key": ...} tutar; bulgu sanılıp boş vaka üretmesin).
+    if "organ" not in findings and "schema_version" not in findings:
+        return None
     # İzinli-alan anonimleştirme (kimlik/geçmiş asla gönderilmez)
     return reporting.anonymize_findings(findings)
 
@@ -60,7 +64,10 @@ def main(dosyalar: list[str] | None = None) -> None:
     if dosyalar:
         paths = [d if os.path.isabs(d) else os.path.join(FINDINGS_DIR, d) for d in dosyalar]
     else:
-        paths = sorted(glob.glob(os.path.join(FINDINGS_DIR, "*.json")))
+        # '*.json' glob'u '<ad>.json.meta.json' cache dosyalarını da yakalar;
+        # onları ele (yoksa 80 vaka -> 160 girdi, boşa API çağrısı).
+        paths = sorted(p for p in glob.glob(os.path.join(FINDINGS_DIR, "*.json"))
+                       if not p.endswith(".meta.json"))
     if not paths:
         print(f"⚠️  {FINDINGS_DIR} içinde JSON yok."); return
 
