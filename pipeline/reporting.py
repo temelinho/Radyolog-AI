@@ -43,7 +43,9 @@ SYSTEM_PROMPT = (
     "as a definitive T-stage.\n"
     "- Vascular encasement is a research-grade measurement; do not decide "
     "resectability from it alone, and recommend histopathological confirmation.\n"
-    "- Write in English, concise, plain text (no Markdown).\n"
+    "- Write in English as a complete, standard radiology report in plain text "
+    "(no Markdown). Be as thorough as the metrics support; do not pad with "
+    "content that is not grounded in the given metrics.\n"
     "STRUCTURE: 1. TECHNIQUE 2. FINDINGS 3. VASCULAR (if any) 4. SIZE CATEGORY "
     "(if any) 5. IMPRESSION AND RECOMMENDATION"
 )
@@ -242,7 +244,7 @@ class LLMResponse:
 
 def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
              findings: dict[str, Any] | None = None,
-             temperature: float = 0.3, max_tokens: int = 2500) -> LLMResponse:
+             temperature: float = 0.3, max_tokens: int = 3500) -> LLMResponse:
     if provider == "template":
         return LLMResponse(template_report(findings or {}), provider, model,
                            finish_reason="stop")
