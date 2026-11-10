@@ -292,11 +292,15 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
                 msg = str(_e)
                 transient = ("429" in msg or "RESOURCE_EXHAUSTED" in msg
                              or "503" in msg or "UNAVAILABLE" in msg)
-                if not transient or _att == tries - 1:
-                    raise
+                # GÜNLÜK kota duvarı (PerDay, ücretsiz katman 20/gün): retryDelay
+                # saatler sürer; beklemek anlamsız -> hemen bırak (vaka .txt yazılmaz,
+                # ertesi gün devam-ettirmede denenir). Sadece DAKİKALIK/503 retrylenir.
+                daily = ("PerDay" in msg or "per day" in msg.lower())
                 m = _re.search(r"retry(?:Delay)?['\"]?\s*[:=]?\s*['\"]?\s*"
                                r"(?:in\s*)?([0-9]+(?:\.[0-9]+)?)\s*s", msg, _re.I)
                 wait = float(m.group(1)) if m else 0.0
+                if not transient or daily or wait > 120 or _att == tries - 1:
+                    raise
                 wait = max(wait, 13.0 * (_att + 1))      # 5/dk için en az ~13s
                 _time.sleep(min(wait, 65.0))
         fr = None
