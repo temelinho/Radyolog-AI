@@ -101,7 +101,12 @@ def main(dosyalar: list[str] | None = None) -> None:
                 except NotImplementedError:
                     print(f"  ⏭️  {etiket}: açık model Colab'da çalışır, atlandı."); continue
                 except Exception as e:
-                    print(f"  ❌ {etiket}: {e}"); continue
+                    # repr: boş str'li hatalarda bile tip görünür; boşsa tam traceback.
+                    print(f"  ❌ {etiket}: {e!r}")
+                    if not str(e):
+                        import traceback
+                        traceback.print_exc()
+                    continue
                 if not resp.is_valid():  # boş/kesik yanıt başarı sayılmaz (F19)
                     print(f"  ⚠️  {etiket}: geçersiz/kesik yanıt, atlandı."); continue
                 text = resp.text
