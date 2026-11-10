@@ -47,7 +47,7 @@ class TestReportingF19F22(unittest.TestCase):
         findings = {"organ": "karaciger", "lezyon_sayisi": 0}
         resp = REP.call_llm("template", "rule-based", REP.SYSTEM_PROMPT, "x", findings=findings)
         self.assertTrue(resp.is_valid())
-        self.assertIn("lezyon", resp.text.lower())
+        self.assertIn("lesion", resp.text.lower())   # rapor İngilizce üretilir
 
 
 class TestIntegrationTemplateFidelity(unittest.TestCase):

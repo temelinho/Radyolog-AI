@@ -25,25 +25,27 @@ ALLOWED_FIELDS = {
     "lezyon_sayisi", "toplam_tumor_hacim_cm3",
     "en_buyuk_cap_lezyon", "en_buyuk_hacim_lezyon",
     "damar", "boyut_kategorisi", "vaskuler",
-    "schema_version", "model", "model_agirlik", "damar_model",
-    # NOT: 'provenance' BİLEREK yok — maske yolu hasta study_id'si taşır ve dış
-    # LLM'e gitmemeli (RUA). Provenance tam bulgular.json'da yerelde kalır (F22).
+    # NOT: Modele YALNIZ organ + klinik metrikler gider. Veri seti / segmentasyon
+    # modeli kimliği (model, model_agirlik, damar_model) ve teknik meta
+    # (schema_version, provenance) BİLEREK yok — kaynak sızmasın, model yanlı
+    # olmasın; provenance tam bulgular.json'da yerelde kalır (F22, RUA).
 }
 
 SYSTEM_PROMPT = (
-    "Sen deneyimli bir abdominal radyologsun. Sana verilen BT segmentasyon "
-    "bulgularını raporla.\n"
-    "KURALLAR:\n"
-    "- YALNIZ verilen metriklere dayan. Metrikte olmayan hiçbir sayı/bulgu UYDURMA.\n"
-    "- Değeri 'null' veya 'değerlendirilemez' olan alanları ölçülmüş gibi sunma; "
-    "eksikliği açıkça belirt.\n"
-    "- Boyut kategorisi verildiyse bunu 'boyut kategorisi' olarak adlandır; "
-    "kesin T-evresi olarak sunma.\n"
-    "- Vasküler sarma araştırma ölçümüdür; tek başına kesin rezektabilite "
-    "kararı verme, histopatolojik doğrulama öner.\n"
-    "- Türkçe, kısa ve öz, düz metin yaz (Markdown kullanma).\n"
-    "YAPI: 1.TEKNİK 2.BULGULAR 3.VASKÜLER (varsa) 4.BOYUT KATEGORİSİ (varsa) "
-    "5.SONUÇ VE ÖNERİ"
+    "You are an experienced abdominal radiologist. Report the CT segmentation "
+    "findings you are given.\n"
+    "RULES:\n"
+    "- Rely ONLY on the provided metrics. Do NOT invent any number or finding "
+    "that is not in the metrics.\n"
+    "- Do not present a field whose value is 'null' or 'not assessed' as if it "
+    "were measured; state the absence explicitly.\n"
+    "- If a size category is given, call it a 'size category'; do not present it "
+    "as a definitive T-stage.\n"
+    "- Vascular encasement is a research-grade measurement; do not decide "
+    "resectability from it alone, and recommend histopathological confirmation.\n"
+    "- Write in English, concise, plain text (no Markdown).\n"
+    "STRUCTURE: 1. TECHNIQUE 2. FINDINGS 3. VASCULAR (if any) 4. SIZE CATEGORY "
+    "(if any) 5. IMPRESSION AND RECOMMENDATION"
 )
 
 
@@ -79,10 +81,43 @@ def anonymize_findings(findings: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_prompt(findings: dict[str, Any]) -> str:
-    temiz = anonymize_findings(findings)
-    return ("BT Segmentasyon Bulguları:\n"
-            + json.dumps(temiz, ensure_ascii=False, indent=2)
-            + "\n\nStandart radyoloji raporu oluştur.")
+    """Modele giden istem: YALNIZ organ + klinik sayısal metrikler, İngilizce.
+
+    Veri seti / segmentasyon modeli kimliği ve teknik meta VERİLMEZ (modele kaynak
+    sızdırmamak, yanlılık yaratmamak). Türkçe kategorik uyarı metinleri yerine
+    yalnız sayısal değerler sunulur; klinik çerçeveyi sistem promptu verir.
+    """
+    f = anonymize_findings(findings)   # güvenlik: yalnız izinli (klinik) alanlar
+    L = ["CT segmentation findings — use ONLY these values, invent nothing:"]
+    L.append(f"- Organ: {f.get('organ', 'unknown')}")
+    n = f.get("lezyon_sayisi")
+    L.append(f"- Number of lesions: {'not assessed' if n is None else n}")
+    tv = f.get("toplam_tumor_hacim_cm3")
+    if tv is not None:
+        L.append(f"- Total tumor volume: {tv} cm3")
+    enb = f.get("en_buyuk_cap_lezyon")
+    if isinstance(enb, dict):
+        L.append(f"- Largest lesion by diameter: {enb.get('cap_mm')} mm diameter, "
+                 f"{enb.get('hacim_cm3')} cm3 volume")
+    env = f.get("en_buyuk_hacim_lezyon")
+    if isinstance(env, dict):
+        L.append(f"- Largest lesion by volume: {env.get('cap_mm')} mm diameter, "
+                 f"{env.get('hacim_cm3')} cm3 volume")
+    damar = f.get("damar") or {}
+    if isinstance(damar, dict) and damar:
+        L.append("- Vessels (research-grade):")
+        for vn, vi in damar.items():
+            if not isinstance(vi, dict):
+                continue
+            d = vi.get("mesafe_mm")
+            a = vi.get("sarma_derece")
+            ds = f"distance {d} mm" if d is not None else "distance not assessed"
+            as_ = f"encasement angle {a} degrees" if a is not None else "encasement not assessed"
+            L.append(f"    - {vn.replace('_', ' ')}: {ds}, {as_}")
+    bk = f.get("boyut_kategorisi")
+    if isinstance(bk, dict) and bk.get("kategori"):
+        L.append(f"- Size category (size only, NOT a T-stage): {bk['kategori']}")
+    return "\n".join(L) + "\n\nWrite a standard radiology report in English."
 
 
 # ---------------------------------------------------------------------------
@@ -92,45 +127,54 @@ def template_report(findings: dict[str, Any]) -> str:
     organ = findings.get("organ", "organ")
     n = findings.get("lezyon_sayisi", 0)
     enb = findings.get("en_buyuk_cap_lezyon") or {}
-    satir = ["1. TEKNİK", f"{findings.get('goruntuleme', 'bilinmiyor')} inceleme.", ""]
-    satir.append("2. BULGULAR")
-    if n == 0:
-        satir.append(f"{organ.capitalize()} parankiminde ölçülebilir fokal lezyon saptanmadı.")
+    faz = findings.get("goruntuleme") or "unknown"
+    if faz in ("bilinmiyor", "unknown", ""):
+        teknik = "CT study, phase not specified."
     else:
-        satir.append(f"{organ.capitalize()} parankiminde {n} adet lezyon izlendi.")
+        teknik = f"{faz} CT study."
+    L = ["1. TECHNIQUE", teknik, ""]
+    L.append("2. FINDINGS")
+    if not n:
+        L.append(f"No measurable focal lesion detected in the {organ} parenchyma.")
+    else:
+        L.append(f"{n} lesion(s) observed in the {organ} parenchyma.")
         if enb.get("cap_mm") is not None:
-            satir.append(f"En büyük lezyonun aksiyel çapı {enb['cap_mm']} mm.")
+            L.append(f"The largest lesion has an axial diameter of {enb['cap_mm']} mm.")
         if enb.get("hacim_cm3") is not None:
-            satir.append(f"Bu lezyonun hacmi {enb['hacim_cm3']} cm3.")
+            L.append(f"The volume of this lesion is {enb['hacim_cm3']} cm3.")
         tot = findings.get("toplam_tumor_hacim_cm3")
         if tot:
-            satir.append(f"Toplam tümör hacmi {tot} cm3.")
-    # Vasküler
-    vask = findings.get("vaskuler", {}).get("damarlar", [])
+            L.append(f"Total tumor volume is {tot} cm3.")
+    # Vascular
+    vask = (findings.get("vaskuler") or {}).get("damarlar", [])
     if vask:
-        satir += ["", "3. VASKÜLER"]
+        L += ["", "3. VASCULAR"]
         for v in vask:
             if v.get("durum") == "değerlendirilemez":
-                satir.append(f"{v['damar']}: değerlendirilemedi.")
+                L.append(f"{v['damar'].replace('_', ' ')}: not assessed.")
                 continue
-            m = v.get("mesafe_mm"); d = v.get("sarma_derece")
-            m_s = "ölçülemedi" if m is None else f"{m} mm"
-            d_s = "ölçülemedi" if d is None else f"{d} derece"
-            satir.append(f"{v['damar']}: mesafe {m_s}, sarma {d_s} (araştırma ölçümü).")
-    # Boyut kategorisi
+            m = v.get("mesafe_mm")
+            d = v.get("sarma_derece")
+            m_s = "not measured" if m is None else f"{m} mm"
+            d_s = "not measured" if d is None else f"{d} degrees"
+            L.append(f"{v['damar'].replace('_', ' ')}: distance {m_s}, "
+                     f"encasement {d_s} (research-grade).")
+    # Size category
     bk = findings.get("boyut_kategorisi", {})
     if bk.get("kategori"):
-        satir += ["", "4. BOYUT KATEGORİSİ", f"Boyut kategorisi: {bk['kategori']}. {bk.get('uyari','')}"]
-    satir += ["", "5. SONUÇ VE ÖNERİ",
-              "Bulgular segmentasyon ölçümlerine dayanır; histopatolojik doğrulama önerilir."]
-    return "\n".join(satir)
+        L += ["", "4. SIZE CATEGORY",
+              f"Size category: {bk['kategori']} (size only, not a T-stage)."]
+    L += ["", "5. IMPRESSION AND RECOMMENDATION",
+          "Findings are based on segmentation measurements; histopathological "
+          "confirmation is recommended."]
+    return "\n".join(L)
 
 
 # ---------------------------------------------------------------------------
 # Sağlayıcı adaptörleri (F19)
 # ---------------------------------------------------------------------------
 MODELS = {
-    "Claude":   {"provider": "anthropic", "model": "claude-opus-4-8"},   # Opus/Sonnet kararı: config
+    "Claude":   {"provider": "anthropic", "model": "claude-sonnet-5-5"},  # Sonnet (bütçe); diğerleriyle aynı koşul
     "Gemini":   {"provider": "google", "model": "gemini-2.5-flash"},
     "Qwen":     {"provider": "local_hf", "model": "Qwen2.5-14B-Instruct"},
     "Gemma":    {"provider": "local_hf", "model": "gemma-2-9b-it"},
@@ -209,9 +253,11 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
             raise RuntimeError("ANTHROPIC_API_KEY yok (.env).")
         import anthropic
         client = anthropic.Anthropic(api_key=key)
-        # Opus/Sonnet reasoning: temperature API varsayılanıyla (gönderme).
+        # TÜM modeller AYNI koşul: diğerleriyle birebir aynı temperature gönderilir
+        # (tek koşul seti; hiçbir modele ayrıcalık yok — adil kıyas).
         msg = client.messages.create(
-            model=model, max_tokens=max_tokens, system=system_prompt,
+            model=model, max_tokens=max_tokens, temperature=temperature,
+            system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}])
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
         return LLMResponse(text, provider, model, finish_reason=msg.stop_reason,

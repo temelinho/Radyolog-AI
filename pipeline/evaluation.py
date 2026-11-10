@@ -92,7 +92,8 @@ def findings_to_facts(findings: dict[str, Any]) -> list[Fact]:
     if isinstance(enb, dict):
         if enb.get("cap_mm") is not None:
             facts.append(Fact("en_buyuk_cap", "length", float(enb["cap_mm"]),
-                              ["çap", "cap", "diameter", "boyut", "lezyon", "kitle"]))
+                              ["çap", "cap", "diameter", "boyut", "lezyon", "kitle",
+                               "lesion", "mass", "measures", "measuring"]))
         if enb.get("hacim_cm3") is not None:
             facts.append(Fact("en_buyuk_hacim", "volume", float(enb["hacim_cm3"]),
                               ["hacm", "volume", "cm3", "cm³"]))  # "hacm": hacim/hacmi kökü
@@ -107,10 +108,11 @@ def findings_to_facts(findings: dict[str, Any]) -> list[Fact]:
         kw = [vname.replace("_", " "), *vname.split("_")]
         if vinfo.get("mesafe_mm") is not None:
             facts.append(Fact(f"{vname}_mesafe", "length", float(vinfo["mesafe_mm"]),
-                              kw + ["mesafe", "distance", "temas"]))
+                              kw + ["mesafe", "distance", "temas", "contact", "abut"]))
         if vinfo.get("sarma_derece") is not None:
             facts.append(Fact(f"{vname}_sarma", "angle", float(vinfo["sarma_derece"]),
-                              kw + ["sarma", "derece", "angle", "temas"]))
+                              kw + ["sarma", "derece", "angle", "temas",
+                                    "encasement", "encases", "contact", "abut"]))
     return facts
 
 
