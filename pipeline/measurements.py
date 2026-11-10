@@ -207,19 +207,27 @@ def vessel_wrap_angle_deg(tumor_mask: np.ndarray, vessel_mask: np.ndarray,
     if not vessel_mask.any():
         return {"sarma_derece": None, "status": Status.EMPTY_MASK, "research_grade": True}
 
-    # Yalnız HEM damar HEM tümör bulunan kesitlerde çalış (boş kesitleri gezme).
-    v_present = vessel_mask.any(axis=(0, 1))
-    t_present = tumor_mask.any(axis=(0, 1))
-    both = np.nonzero(v_present & t_present)[0]
-
-    best_angle = 0.0
+    # Damar (i,j) BİRLEŞİK sınır kutusu + temas marjini: tüm hesabı bu küçük
+    # pencereye kırp. Sarma açısı çeviri-değişmezdir (merkez-göreli açı, göreli
+    # mesafe) → kırpma SONUCU DEĞİŞTİRMEZ, ama kesit başına 512×512 taramayı bitirir.
     spacing_xy = np.array([sx, sy])
-    H, W = vessel_mask.shape[0], vessel_mask.shape[1]
     mi = int(np.ceil(contact / sx)) + 2      # satır (i) temas marjini (piksel)
     mj = int(np.ceil(contact / sy)) + 2      # sütun (j) temas marjini (piksel)
+    vi = np.where(vessel_mask.any(axis=(1, 2)))[0]
+    vj = np.where(vessel_mask.any(axis=(0, 2)))[0]
+    I0, I1 = max(int(vi[0]) - mi, 0), min(int(vi[-1]) + 1 + mi, vessel_mask.shape[0])
+    J0, J1 = max(int(vj[0]) - mj, 0), min(int(vj[-1]) + 1 + mj, vessel_mask.shape[1])
+    vcrop = vessel_mask[I0:I1, J0:J1, :]
+    tcrop = tumor_mask[I0:I1, J0:J1, :]
+    H, W = tcrop.shape[0], tcrop.shape[1]
+
+    # Yalnız HEM damar HEM tümör bulunan kesitlerde çalış (boş kesitleri gezme).
+    both = np.nonzero(vcrop.any(axis=(0, 1)) & tcrop.any(axis=(0, 1)))[0]
+
+    best_angle = 0.0
     for k in both:
-        v2 = np.take(vessel_mask, k, axis=AXIAL_AXIS)
-        # Damar sınır kutusu (ucuz any-projeksiyon); tüm 512×512'de erozyon YOK.
+        v2 = np.take(vcrop, k, axis=AXIAL_AXIS)
+        # Damar sınır kutusu (ucuz any-projeksiyon).
         vr = np.where(v2.any(axis=1))[0]
         vc = np.where(v2.any(axis=0))[0]
         if vr.size == 0:
@@ -228,10 +236,10 @@ def vessel_wrap_angle_deg(tumor_mask: np.ndarray, vessel_mask: np.ndarray,
         vb_local = _slice_boundary(v2[r0:r1, c0:c1])       # yalnız damar kutusu
         if vb_local.shape[0] == 0:
             continue
-        v_bound = vb_local + (r0, c0)                       # global (i,j)
+        v_bound = vb_local + (r0, c0)                       # kırpıma göre (i,j)
         v_phys = v_bound.astype(float) * spacing_xy
         centroid = v_phys.mean(axis=0)  # YEREL merkez (bu kesit)
-        t2 = np.take(tumor_mask, k, axis=AXIAL_AXIS)
+        t2 = np.take(tcrop, k, axis=AXIAL_AXIS)
         # İçeride (t2 True) ise mesafe 0; dışarıda ise en yakın tümör SINIRI.
         inside = t2[v_bound[:, 0], v_bound[:, 1]]
         dist = np.zeros(v_bound.shape[0])
