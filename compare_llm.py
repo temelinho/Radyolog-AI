@@ -83,7 +83,18 @@ def main(dosyalar: list[str] | None = None) -> None:
 
         prompt = reporting.build_prompt(findings)
         print(f"\n=== {ad} ({findings.get('organ', '?')}) ===")
+        # Model-model koşuda (her çağrı tek model) ÖNCEKİ modellerin sonuçlarını EZME:
+        # varsa mevcut karşılaştırmayı yükle, üstüne bu koşunun modelini ekle.
+        kpath = os.path.join(OUTPUT_DIR, f"{ad}__karsilastirma.json")
         karsilastirma = {"hasta": ad, "bulgular": findings, "raporlar": {}, "sadakat": {}}
+        if os.path.exists(kpath):
+            try:
+                with open(kpath, "r", encoding="utf-8") as f:
+                    eski = json.load(f)
+                karsilastirma["raporlar"] = eski.get("raporlar", {}) or {}
+                karsilastirma["sadakat"] = eski.get("sadakat", {}) or {}
+            except Exception:
+                pass
 
         for etiket, cfg in models.items():
             out_txt = os.path.join(OUTPUT_DIR, f"{ad}__{etiket}.txt")
@@ -128,15 +139,28 @@ def main(dosyalar: list[str] | None = None) -> None:
                          "oran": fid.ratio,
                          "yontem": "otomatik-proxy-cache" if cached else "otomatik-proxy"})
 
-        with open(os.path.join(OUTPUT_DIR, f"{ad}__karsilastirma.json"), "w", encoding="utf-8") as f:
+        with open(kpath, "w", encoding="utf-8") as f:
             json.dump(karsilastirma, f, ensure_ascii=False, indent=2)
 
     if ozet:
         csv_path = os.path.join(OUTPUT_DIR, "ozet.csv")
+        # BİRİKİMLİ: mevcut ozet.csv'yi oku, (hasta, model) anahtarıyla birleştir ki
+        # model-model koşuda son model öncekileri EZMESİN (480 satır tam kalsın).
+        birlesik: dict[tuple, dict] = {}
+        if os.path.exists(csv_path):
+            try:
+                with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
+                    for row in csv.DictReader(f):
+                        birlesik[(row.get("hasta"), row.get("model"))] = row
+            except Exception:
+                pass
+        for row in ozet:
+            birlesik[(row["hasta"], row["model"])] = row
+        rows = sorted(birlesik.values(), key=lambda r: (r.get("model", ""), r.get("hasta", "")))
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=list(ozet[0].keys()))
-            w.writeheader(); w.writerows(ozet)
-        print(f"\n📊 Özet: {csv_path}")
+            w.writeheader(); w.writerows(rows)
+        print(f"\n📊 Özet: {csv_path}  (toplam {len(rows)} satır)")
     print(f"📁 Çıktılar: {OUTPUT_DIR}")
 
 

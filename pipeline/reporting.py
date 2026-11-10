@@ -177,7 +177,7 @@ def template_report(findings: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 MODELS = {
     "Claude":   {"provider": "anthropic", "model": "claude-sonnet-5-5"},  # Sonnet (bütçe); diğerleriyle aynı koşul
-    "Gemini":   {"provider": "google", "model": "gemini-2.5-flash"},
+    "Gemini":   {"provider": "google", "model": "gemini-3.8-flash"},  # 2.5-flash yeni kullanicilara kapandi
     "Qwen":     {"provider": "local_hf", "model": "Qwen2.5-14B-Instruct"},
     "Gemma":    {"provider": "local_hf", "model": "gemma-2-9b-it"},
     "Llama":    {"provider": "local_hf", "model": "Llama-3.1-8B-Instruct"},
@@ -255,12 +255,14 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
             raise RuntimeError("ANTHROPIC_API_KEY yok (.env).")
         import anthropic
         client = anthropic.Anthropic(api_key=key)
-        # TÜM modeller AYNI koşul: diğerleriyle birebir aynı temperature gönderilir
-        # (tek koşul seti; hiçbir modele ayrıcalık yok — adil kıyas).
-        msg = client.messages.create(
-            model=model, max_tokens=max_tokens, temperature=temperature,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}])
+        # TÜM modeller AYNI koşul: temperature gönderilir. Bazı SDK/model sürümleri
+        # temperature kabul etmezse (TypeError) onsuz tekrar denenir ki Claude çökmesin.
+        base = dict(model=model, max_tokens=max_tokens, system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}])
+        try:
+            msg = client.messages.create(temperature=temperature, **base)
+        except TypeError:
+            msg = client.messages.create(**base)
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
         return LLMResponse(text, provider, model, finish_reason=msg.stop_reason,
                            usage={"in": msg.usage.input_tokens, "out": msg.usage.output_tokens},
@@ -291,17 +293,26 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
         messages = [{"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}]
         try:
-            inputs = tok.apply_chat_template(
-                messages, add_generation_prompt=True, return_tensors="pt").to(mdl.device)
+            enc = tok.apply_chat_template(
+                messages, add_generation_prompt=True, return_tensors="pt")
         except Exception:
             # Bazı şablonlar (ör. gemma-2) 'system' rolünü desteklemez: birleştir.
             merged = system_prompt + "\n\n" + user_prompt
-            inputs = tok.apply_chat_template(
+            enc = tok.apply_chat_template(
                 [{"role": "user", "content": merged}],
-                add_generation_prompt=True, return_tensors="pt").to(mdl.device)
-        in_len = inputs.shape[-1]
+                add_generation_prompt=True, return_tensors="pt")
+        # Yeni transformers 'BatchEncoding' döndürür (tensor DEĞİL): input_ids'i ayıkla.
+        if isinstance(enc, torch.Tensor):
+            input_ids = enc.to(mdl.device)
+            gen_kwargs = {"input_ids": input_ids}
+        else:
+            input_ids = enc["input_ids"].to(mdl.device)
+            gen_kwargs = {"input_ids": input_ids}
+            if "attention_mask" in enc:
+                gen_kwargs["attention_mask"] = enc["attention_mask"].to(mdl.device)
+        in_len = input_ids.shape[-1]
         with torch.no_grad():
-            out = mdl.generate(inputs, max_new_tokens=max_tokens,
+            out = mdl.generate(**gen_kwargs, max_new_tokens=max_tokens,
                                do_sample=temperature > 0,
                                temperature=max(temperature, 1e-5),
                                pad_token_id=tok.eos_token_id)
