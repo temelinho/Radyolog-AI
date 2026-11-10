@@ -14,6 +14,7 @@ Düzeltmeler:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -273,12 +274,31 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
         if not key:
             raise RuntimeError("GOOGLE_API_KEY yok (.env).")
         from google import genai
+        import re as _re, time as _time
         client = genai.Client(api_key=key)
-        resp = client.models.generate_content(
-            model=model, contents=user_prompt,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=system_prompt, temperature=temperature,
-                max_output_tokens=max_tokens))          # F19: max_tokens aktarıldı
+        gen_cfg = genai.types.GenerateContentConfig(
+            system_instruction=system_prompt, temperature=temperature,
+            max_output_tokens=max_tokens)               # F19: max_tokens aktarıldı
+        # Ücretsiz kota (5 istek/dk) ve geçici 503 için retry+backoff. Hata
+        # 'retryDelay'/'retry in Ns' taşır; onu okuyup bekleriz, yoksa üstel backoff.
+        tries = int(os.environ.get("RADYOLOG_GEMINI_RETRIES", "6") or 6)
+        resp = None
+        for _att in range(tries):
+            try:
+                resp = client.models.generate_content(
+                    model=model, contents=user_prompt, config=gen_cfg)
+                break
+            except Exception as _e:
+                msg = str(_e)
+                transient = ("429" in msg or "RESOURCE_EXHAUSTED" in msg
+                             or "503" in msg or "UNAVAILABLE" in msg)
+                if not transient or _att == tries - 1:
+                    raise
+                m = _re.search(r"retry(?:Delay)?['\"]?\s*[:=]?\s*['\"]?\s*"
+                               r"(?:in\s*)?([0-9]+(?:\.[0-9]+)?)\s*s", msg, _re.I)
+                wait = float(m.group(1)) if m else 0.0
+                wait = max(wait, 13.0 * (_att + 1))      # 5/dk için en az ~13s
+                _time.sleep(min(wait, 65.0))
         fr = None
         try:
             fr = str(resp.candidates[0].finish_reason)
