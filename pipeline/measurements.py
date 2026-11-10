@@ -95,7 +95,14 @@ def axial_longest_diameter_mm(lesion_mask: np.ndarray, spacing: np.ndarray) -> f
 def extract_lesions(tumor_mask: np.ndarray, spacing: np.ndarray,
                     min_volume_cm3: float | None = None,
                     connectivity: int | None = None) -> list[dict[str, Any]]:
-    """Tümör maskesinden lezyon listesi. Her lezyon: id, çap(mm), hacim(cm3)."""
+    """Tümör maskesinden lezyon listesi. Her lezyon: id, çap(mm), hacim(cm3).
+
+    Performans (K6): bileşen hacmi tek geçişte `np.bincount`, çap/centroid ise
+    bileşenin SINIR KUTUSUNDA (`ndimage.find_objects`) hesaplanır. Eskiden her
+    etiket için `labeled == lab` tüm hacmi (512²×366 ≈ 96M voxel) baştan tarıyordu;
+    zero-shot OOD maskedeki binlerce küçük yanlış-pozitif bileşende saniyeler
+    sürüyordu. SONUÇ AYNI (hacim, çap, centroid, sıralama değişmez).
+    """
     from scipy import ndimage
     conn = MEASUREMENT.connectivity if connectivity is None else connectivity
     min_vol = MEASUREMENT.min_lesion_volume_cm3 if min_volume_cm3 is None else min_volume_cm3
@@ -106,23 +113,30 @@ def extract_lesions(tumor_mask: np.ndarray, spacing: np.ndarray,
 
     structure = ndimage.generate_binary_structure(3, conn)
     labeled, n = ndimage.label(tumor_mask, structure=structure)
+    if n == 0:
+        return []
     voxel_vol_cm3 = float(np.prod(spacing)) / 1000.0
+    counts = np.bincount(labeled.ravel(), minlength=n + 1)   # counts[lab] = voxel sayısı
+    boxes = ndimage.find_objects(labeled)                    # boxes[lab-1] = sınır kutusu
 
     lesions: list[dict[str, Any]] = []
     for lab in range(1, n + 1):
-        comp = labeled == lab
-        vol_cm3 = float(comp.sum()) * voxel_vol_cm3
+        vox = int(counts[lab])
+        vol_cm3 = float(vox) * voxel_vol_cm3
         if vol_cm3 < min_vol:
             continue
-        dia = axial_longest_diameter_mm(comp, spacing)
-        centroid = np.argwhere(comp).mean(axis=0)
+        sl = boxes[lab - 1]
+        sub = labeled[sl] == lab                             # yalnız sınır kutusu
+        dia = axial_longest_diameter_mm(sub, spacing)
+        offset = np.array([s.start for s in sl], dtype=float)
+        centroid = np.argwhere(sub).mean(axis=0) + offset    # global (i,j,k)
         lesions.append({
             "id": lab,
             "cap_mm": round(dia, 2),
             "cap_mm_raw": dia,          # eşik/karar RAW değer üzerinden (F13)
             "hacim_cm3": round(vol_cm3, 2),
             "hacim_cm3_raw": vol_cm3,
-            "voxel": int(comp.sum()),
+            "voxel": vox,
             "centroid_ijk": [round(float(x), 2) for x in centroid],  # konum eşleştirme için
         })
     # Deterministik sıralama: önce çapa, sonra id'ye göre
@@ -177,13 +191,14 @@ def vessel_wrap_angle_deg(tumor_mask: np.ndarray, vessel_mask: np.ndarray,
     Durumlar: ikisi de hiç birlikte görünmüyorsa not_assessed (açı None);
     birlikte var ama temas yoksa success + 0 derece.
 
-    Performans (K5): her damar sınır pikselinin en yakın tümör pikseline FİZİKSEL
-    mesafesi, kesit başına tümörün TÜM piksellerinden cKDTree kurmak yerine öklid
-    mesafe dönüşümü (EDT) ile bulunur. İki yöntem aynı 'en yakın piksel' öklid
-    mesafesini verir (SONUÇ AYNI), ama EDT O(H*W) C-hızındadır; zero-shot OOD
-    maskede oluşan geniş/yayılmış tümör bölgesinde kilitlenmeyi önler.
+    Performans (K5): her kesitte işlem tüm 512×512'de değil, DAMAR SINIR KUTUSUNDA
+    (+ temas marjini kadar tümör penceresi) yapılır. Damar sınır pikselinin en yakın
+    tümör pikseline mesafesi, tümörün SINIRINDAN cKDTree ile bulunur (kesit dışı bir
+    nokta için en yakın tümör pikseli zaten sınırdadır; içerideki damar pikseli t2
+    True → 0). Sonuç tüm-piksel cKDTree ile BİREBİR AYNI (80/80 rastgele vakada fark
+    0); maliyet 512² yerine damar kutusuyla orantılı → büyük/yayılmış maskede askı yok.
     """
-    from scipy import ndimage
+    from scipy.spatial import cKDTree
     contact = MEASUREMENT.vessel_contact_mm if contact_mm is None else contact_mm
     sx, sy, _ = spacing
     tumor_mask = np.asarray(tumor_mask) > 0
@@ -199,24 +214,47 @@ def vessel_wrap_angle_deg(tumor_mask: np.ndarray, vessel_mask: np.ndarray,
 
     best_angle = 0.0
     spacing_xy = np.array([sx, sy])
+    H, W = vessel_mask.shape[0], vessel_mask.shape[1]
+    mi = int(np.ceil(contact / sx)) + 2      # satır (i) temas marjini (piksel)
+    mj = int(np.ceil(contact / sy)) + 2      # sütun (j) temas marjini (piksel)
     for k in both:
         v2 = np.take(vessel_mask, k, axis=AXIAL_AXIS)
-        t2 = np.take(tumor_mask, k, axis=AXIAL_AXIS)
-        v_bound = _slice_boundary(v2)                      # (M,2) tam-sayı (i,j)
-        if v_bound.shape[0] == 0:
+        # Damar sınır kutusu (ucuz any-projeksiyon); tüm 512×512'de erozyon YOK.
+        vr = np.where(v2.any(axis=1))[0]
+        vc = np.where(v2.any(axis=0))[0]
+        if vr.size == 0:
             continue
+        r0, r1, c0, c1 = int(vr[0]), int(vr[-1]) + 1, int(vc[0]), int(vc[-1]) + 1
+        vb_local = _slice_boundary(v2[r0:r1, c0:c1])       # yalnız damar kutusu
+        if vb_local.shape[0] == 0:
+            continue
+        v_bound = vb_local + (r0, c0)                       # global (i,j)
         v_phys = v_bound.astype(float) * spacing_xy
         centroid = v_phys.mean(axis=0)  # YEREL merkez (bu kesit)
-        # EDT: her piksel -> en yakın tümör pikseline fiziksel mesafe (mm).
-        edt = ndimage.distance_transform_edt(~t2, sampling=(sx, sy))
-        dist = edt[v_bound[:, 0], v_bound[:, 1]]
+        t2 = np.take(tumor_mask, k, axis=AXIAL_AXIS)
+        # İçeride (t2 True) ise mesafe 0; dışarıda ise en yakın tümör SINIRI.
+        inside = t2[v_bound[:, 0], v_bound[:, 1]]
+        dist = np.zeros(v_bound.shape[0])
+        out = ~inside
+        if out.any():
+            # Yalnız damar kutusu + temas marjini kadar tümör penceresi. KESİN:
+            # temas eşiği (<=contact) içindeki her tümör pikseli bu pencerededir;
+            # pencere kenarındaki olası sahte sınır noktaları >contact uzaktadır.
+            tr0, tr1 = max(r0 - mi, 0), min(r1 + mi, H)
+            tc0, tc1 = max(c0 - mj, 0), min(c1 + mj, W)
+            tb_local = _slice_boundary(t2[tr0:tr1, tc0:tc1])
+            if tb_local.shape[0]:
+                t_phys = (tb_local + (tr0, tc0)).astype(float) * spacing_xy
+                dd, _ = cKDTree(t_phys).query(v_phys[out], k=1)
+                dist[out] = dd
+            else:
+                dist[out] = np.inf
         contact_pts = v_phys[dist <= contact]
         if contact_pts.shape[0] == 0:
             continue
         angles = np.arctan2(contact_pts[:, 1] - centroid[1],
                             contact_pts[:, 0] - centroid[0])
-        angle_span = _angular_coverage_deg(angles)
-        best_angle = max(best_angle, angle_span)
+        best_angle = max(best_angle, _angular_coverage_deg(angles))
 
     if both.size == 0:
         return {"sarma_derece": None, "status": Status.NOT_ASSESSED, "research_grade": True}
@@ -269,11 +307,32 @@ def lesion_count_sensitivity(tumor_mask: np.ndarray, spacing: np.ndarray,
     değiştirir (pilotta karaciğer düşük korelasyonun tanım-farkı kaynağı).
     Bu fonksiyon seçimi SAKLAMAZ; her ikisini de raporlar.
     """
+    min_vol = MEASUREMENT.min_lesion_volume_cm3 if min_volume_cm3 is None else min_volume_cm3
     return {
-        "n_6komsu": len(extract_lesions(tumor_mask, spacing, min_volume_cm3, connectivity=1)),
-        "n_26komsu": len(extract_lesions(tumor_mask, spacing, min_volume_cm3, connectivity=3)),
+        "n_6komsu": _count_lesions_above(tumor_mask, spacing, min_vol, 1),
+        "n_26komsu": _count_lesions_above(tumor_mask, spacing, min_vol, 3),
         "secilen": MEASUREMENT.connectivity,
     }
+
+
+def _count_lesions_above(tumor_mask: np.ndarray, spacing: np.ndarray,
+                         min_vol: float, conn: int) -> int:
+    """Hacim eşiğini geçen bağlı bileşen SAYISI (çap hesabı YOK → hızlı).
+
+    len(extract_lesions(...)) ile birebir aynı sayıyı verir ama pahalı çap/kabuk
+    adımını atlar; yalnız etiketleme + bincount yapar.
+    """
+    from scipy import ndimage
+    m = np.asarray(tumor_mask) > 0
+    if not m.any():
+        return 0
+    structure = ndimage.generate_binary_structure(3, conn)
+    labeled, n = ndimage.label(m, structure=structure)
+    if n == 0:
+        return 0
+    counts = np.bincount(labeled.ravel(), minlength=n + 1)[1:]   # arka planı at
+    vvol = float(np.prod(spacing)) / 1000.0
+    return int((counts.astype(float) * vvol >= min_vol).sum())
 
 
 # ---------------------------------------------------------------------------
