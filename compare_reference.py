@@ -83,15 +83,23 @@ def pipeline_diameter(fnd: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 # Rapor metni yardımcıları
 # ---------------------------------------------------------------------------
+def sentences(text: str) -> list[str]:
+    """Cümle böl: ondalığı (41.2) korur ama rakamla biten cümleyi de ayırır
+    ("segment 7. The pancreas ..."). evaluation.split_sentences ikincisini
+    birleştirdiği için burada ayrı bir bölücü kullanılır (sadakat skoru değişmez)."""
+    parts = re.split(r"(?<!\d)\.(?!\d)|(?<=\d)\.(?=\s+[A-Z])|\.\s*$|\n+", text or "")
+    return [p.strip() for p in parts if p and p.strip()]
+
+
 def organ_sentences(text: str, organ: str) -> list[str]:
     pat = re.compile(ORGAN_RE[organ], re.I)
-    return [s for s in evaluation.split_sentences(text or "") if pat.search(s)]
+    return [s for s in sentences(text) if pat.search(s)]
 
 
 def report_claims(text: str) -> tuple[bool, float | None]:
     """Rapor metninden (lezyon var beyanı, yazılan en büyük çap mm)."""
     positive, best = False, None
-    for s in evaluation.split_sentences(text or ""):
+    for s in sentences(text):
         if not re.search(LESION_RE, s, re.I):
             continue
         negated = bool(re.search(NEG_RE, s, re.I))
