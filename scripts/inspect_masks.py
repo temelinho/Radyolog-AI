@@ -40,7 +40,7 @@ def _worst_from_csv(n: int) -> list[tuple[str, float, float]]:
     if not p.exists():
         return []
     rows = []
-    with open(p, encoding="utf-8") as f:
+    with open(p, encoding="utf-8-sig") as f:  # cap_uyumu_vaka.csv BOM'lu yazılır
         for row in csv.DictReader(f):
             if row.get("durum") != "eslesti":
                 continue
