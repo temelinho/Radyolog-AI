@@ -71,6 +71,40 @@ def load_findings(findings_dir: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _kohort_to_refs(path: str) -> list[reference.ReferenceMeasurement]:
+    """kohort_80_liste.csv (no, organ, grup, study_id, cap_mm) -> referans kayıtları.
+
+    grup: Tumor -> POS, Normal -> NEG. cap_mm radyolog raporundan transkribe çap.
+    """
+    refs = []
+    with open(path, "r", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+            sid = row.get("study_id") or row.get("study id")
+            if not sid:
+                continue
+            grup = row.get("grup", row.get("group", "")).lower()
+            group = "POS" if grup in ("tumor", "tümör", "pos", "1") else "NEG"
+            refs.append(reference.ReferenceMeasurement(
+                study_id=sid, organ=organ_key(row.get("organ", "")) or row.get("organ", ""),
+                group=group,
+                target_diameter_mm=row.get("cap_mm", "") if group == "POS" else "",
+                source_sentence="kohort_80_liste.csv", transcriber="kohort"))
+    return refs
+
+
+def load_references(path: str) -> list[reference.ReferenceMeasurement]:
+    """reference_gt.csv varsa onu, yoksa aynı klasördeki kohort_80_liste.csv'yi oku."""
+    p = Path(path)
+    if p.exists() and p.name != "kohort_80_liste.csv":
+        return reference.load_csv(p)
+    alt = p if p.name == "kohort_80_liste.csv" else p.parent / "kohort_80_liste.csv"
+    if not alt.exists():
+        raise FileNotFoundError(f"referans yok: {p} ve {alt}")
+    print(f"ℹ️  referans: {alt.name}")
+    return _kohort_to_refs(str(alt))
+
+
 def pipeline_diameter(fnd: dict[str, Any]) -> float:
     """Pipeline'ın hedef çapı (RAW tercih). Lezyon yoksa 0.0 (= negatif karar)."""
     enb = fnd.get("en_buyuk_cap_lezyon")
@@ -169,7 +203,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     a = ap.parse_args(argv)
 
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    refs = reference.index_by_study(reference.load_csv(a.reference))
+    refs = reference.index_by_study(load_references(a.reference))
     cases = load_findings(a.findings)
     ortak = sorted(set(refs) & set(cases))
     print(f"referans: {len(refs)} · bulgu: {len(cases)} · ortak: {len(ortak)}")
