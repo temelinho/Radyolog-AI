@@ -114,6 +114,17 @@ def pipeline_diameter(fnd: dict[str, Any]) -> float:
     return float(v) if v is not None else 0.0
 
 
+def pipeline_diameter_by_volume(fnd: dict[str, Any]) -> float:
+    """Alternatif hedef: en büyük HACİMLİ lezyonun çapı (ince damar/çizgi
+    artefaktlarını eler; RECIST'te hedef lezyon damar değil kütledir).
+    Lezyon yoksa 0.0. en_buyuk_hacim_lezyon ham çap tutmaz -> cap_mm kullanılır."""
+    env = fnd.get("en_buyuk_hacim_lezyon")
+    if not isinstance(env, dict) or not fnd.get("lezyon_sayisi"):
+        return 0.0
+    v = env.get("cap_mm_raw", env.get("cap_mm"))
+    return float(v) if v is not None else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Rapor metni yardımcıları
 # ---------------------------------------------------------------------------
@@ -236,13 +247,16 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
 
     # ---------------- 2) ÇAP UYUMU ----------------
     print("\n=== 2) ÇAP UYUMU (POS vakalar, hedef = en büyük çap politikası) ===")
-    satirlar, ciftler = [], {"hepsi": [], "liver": [], "pancreas": []}
+    satirlar = []
+    ciftler = {"hepsi": [], "liver": [], "pancreas": []}
+    ciftler_vol = {"hepsi": [], "liver": [], "pancreas": []}   # alternatif: hacim politikası
     for s in ortak:
         r = refs[s]
         if r.group.upper() != "POS":
             continue
         ref_mm = reference.reference_mm(r)
         pipe = pipeline_diameter(cases[s]["findings"])
+        pipe_vol = pipeline_diameter_by_volume(cases[s]["findings"])
         if ref_mm is None:
             durum = "referans_olcusu_yok"
         elif pipe <= 0:
@@ -251,10 +265,17 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             durum = "eslesti"
             ciftler["hepsi"].append((pipe, ref_mm))
             ciftler[cases[s]["organ"]].append((pipe, ref_mm))
+        # hacim politikası: aynı "pozitif" vakalarda (lezyon bulunan) kıyasla
+        if durum == "eslesti" and pipe_vol > 0:
+            ciftler_vol["hepsi"].append((pipe_vol, ref_mm))
+            ciftler_vol[cases[s]["organ"]].append((pipe_vol, ref_mm))
         satirlar.append({"study_id": s, "organ": cases[s]["organ"], "durum": durum,
                          "pipeline_mm": round(pipe, 2) if pipe else "",
+                         "pipeline_vol_mm": round(pipe_vol, 2) if pipe_vol else "",
                          "radyolog_mm": "" if ref_mm is None else ref_mm,
                          "fark_mm": round(pipe - ref_mm, 2) if durum == "eslesti" else "",
+                         "fark_vol_mm": (round(pipe_vol - ref_mm, 2)
+                                         if (durum == "eslesti" and pipe_vol > 0) else ""),
                          "lezyon_sayisi": cases[s]["findings"].get("lezyon_sayisi", 0)})
     _write_csv(out / "cap_uyumu_vaka.csv", satirlar)
     for grup, pairs in ciftler.items():
@@ -274,6 +295,24 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
               f"· yanlılık={m['yanlilik']} · r={m['korelasyon']} · LoA={m.get('LoA')}"
               f" · |fark|<=10mm: n={m['yakin_10mm']['n_eslesen']} "
               f"MAE={m['yakin_10mm']['MAE']} r={m['yakin_10mm']['korelasyon']}")
+
+    # --- Alternatif politika: hedef = en büyük HACİMLİ lezyon (artefakt elenir) ---
+    print("\n  --- alternatif hedef: en büyük HACİMLİ lezyon ---")
+    sonuc["cap_uyumu_hacim"] = {}
+    for grup, pairs in ciftler_vol.items():
+        mv = evaluation.measurement_agreement(pairs)
+        yakin = [(p, r) for p, r in pairs if abs(p - r) <= 10.0]
+        mv["yakin_10mm"] = evaluation.measurement_agreement(yakin)
+        if pairs:
+            d = [p - r for p, r in pairs]
+            mu = sum(d) / len(d)
+            sd = (sum((x - mu) ** 2 for x in d) / max(len(d) - 1, 1)) ** 0.5
+            mv["LoA"] = [round(mu - 1.96 * sd, 2), round(mu + 1.96 * sd, 2)]
+        sonuc["cap_uyumu_hacim"][grup] = mv
+        print(f"  [{grup:8}] n={mv['n_eslesen']} · MAE={mv['MAE']} "
+              f"· yanlılık={mv['yanlilik']} · r={mv['korelasyon']} · LoA={mv.get('LoA')}"
+              f" · |fark|<=10mm: n={mv['yakin_10mm']['n_eslesen']} "
+              f"MAE={mv['yakin_10mm']['MAE']} r={mv['yakin_10mm']['korelasyon']}")
     try:
         import matplotlib
         matplotlib.use("Agg")
