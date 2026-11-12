@@ -122,6 +122,67 @@ Drive kökü `MyDrive/Radyolog-AI-2`. İlk gerçek koşuda üç tuzak çıktı v
 4. ⬜ **Gerçek radyolog raporuyla kıyas:** `evaluation.py` + `matching.py` + `reference.py` (GT: `reference_gt.csv`/Merlin raporları).
 5. ⬜ Makale tabloları/şekiller.
 
+## 15. Ölçüm tamamlandı + doğrulama (10 Kasım)
+
+### 15.1 Ölçüm hücresinin takılması ve hızlandırma
+- Ölçüm ilk vakada 30+ dk takıldı. Neden: `vessel_wrap_angle_deg` her kesitte tüm tümör pikselleri üzerinde cKDTree kuruyordu; zero-shot maskedeki yanlış-pozitif serpinti bunu patlattı.
+- Düzeltme (commit `c34decc`, `5a7a4a0`, `05ed6bf`): sarma açısı damar kutusuna kırpılıp sınır pikselleriyle hesaplanıyor; `extract_lesions` `bincount` + `find_objects` kullanıyor; duyarlılık analizi yalnız sayım yapıyor. Eski ve yeni sonuç birebir aynı (fark 0.0), yaklaşık 28 kat hızlı.
+- **Sonuç: 80/80 `bulgular.json`** (63 yeni + 17 cache, başarısız 0).
+
+### 15.2 Ölçüm kodunun doğruluğu (fantom)
+- `tests/test_phantoms.py` (commit `b9db1a6`): analitik küre, elipsoid, iki küre ve anizotropik aralık. Çap hatası %0. Test sayısı **106**.
+
+### 15.3 Uçtan uca doğrulama (radyolog çapı ile)
+- Tüm tümör vakalarında: **r = 0.074, MAE 39 mm, 40 tümörün 8'i tamamen kaçmış.**
+- Segmentasyonun tümörü tuttuğu 18 vakada: **MAE 7 mm, r = 0.96.**
+- Yorum: ölçüm kodu doğru, sınırlayan şey zero-shot segmentasyon (hem kaçırıyor hem yanlış-pozitif üretiyor). Makalede bu şekilde raporlanacak.
+
+### 15.4 Codex bulguları (commit `92253cf`)
+- `.meta.json` cache dosyaları vaka sanılıyordu (80 yerine 160 girdi) → elendi.
+- `provenance` alanı study_id'yi dış LLM'e sızdırıyordu → izinli alanlardan çıkarıldı. `tests/test_security_fixes.py` eklendi.
+
+## 16. Raporlama koşusu (10–12 Kasım)
+
+### 16.1 Kararlar
+- Tüm modeller **aynı koşul**: aynı sistem istemi, aynı girdi, temperature 0.3, aynı max_tokens (3500).
+- Rapor dili **İngilizce** (referans Stanford raporları İngilizce).
+- Modele yalnız **organ + klinik sayısal metrik** gider; veri seti adı, segmentasyon modeli, provenance gitmez.
+- Rapor bilerek kısaltılmıyor (kalite önce gelir).
+- Claude dahil edildi: `claude-sonnet-5-5`.
+- Koşu model-model ilerliyor ve devam-ettirilebilir (`raporlama_colab.ipynb`).
+
+### 16.2 Koşuda çıkan hatalar ve düzeltmeler
+| Hata | Neden | Düzeltme |
+|---|---|---|
+| Claude `TypeError` | SDK temperature parametresi | onsuz yeniden deneme (`3b38064`) |
+| Gemini 404 | `gemini-2.5-flash` kapandı | `gemini-3.8-flash` (`3b38064`) |
+| Qwen/Llama/Gemma `AttributeError` | yeni transformers `BatchEncoding` döndürüyor | `input_ids` ayıklanıyor (`3b38064`) |
+| `ozet.csv` her modelde eziliyordu | tek-model koşusu | (hasta, model) anahtarıyla birikimli (`3b38064`) |
+| Gemini 429/503 | ücretsiz kota | retry + günlük duvarda fail-fast (`20da5f7`, `085f50a`) |
+
+### 16.3 Sonuç: sayısal sadakat (`reports/ozet.csv`)
+80 vakanın 50'sinde lezyon ölçümü var; kalan 30'da kontrol edilecek sayı yok (0/0).
+
+| Model | Rapor | Ölçülebilir vaka | Ortalama sadakat | Medyan |
+|---|---|---|---|---|
+| Template (kural-tabanlı) | 80/80 | 50 | 1.000 | 1.0 |
+| Claude Sonnet | 80/80 | 50 | 1.000 | 1.0 |
+| Qwen | 80/80 | 50 | 1.000 | 1.0 |
+| Gemma | 80/80 | 50 | 0.956 | 1.0 |
+| Llama | 80/80 | 50 | 0.893 | 1.0 |
+| Gemini | 6/80 | 2 | raporlanamaz | - |
+
+- **Gemini değerlendirme dışı:** ücretsiz katman bu model için günde 20 istek veriyor, ayrıca sürekli 503 alındı. Ücretli katman 1.500 TRY ön ödeme istediği için açılmadı.
+- Sayısal sadakat, raporun **verilen** sayıları doğru bağlamda aktarıp aktarmadığını ölçer. Raporun klinik doğruluğunu ölçmez; o adım radyolog raporu kıyasıdır.
+
+## 17. GÜNCEL NEREDE KALDIK (12 Kasım)
+1. ✅ Segmentasyon 80/80, ölçüm 80/80.
+2. ✅ Raporlama: 5 model × 80 vaka = 400 rapor + sadakat skoru.
+3. ⬜ **Sıradaki:** üretilen raporları gerçek radyolog raporlarıyla kıyas (`evaluation.py` + `matching.py` + `reference.py`).
+4. ⬜ Llama/Gemma'nın hangi tür sayıyı kaçırdığının dökümü (`karsilastirma.json` → `missing`).
+5. ⬜ Overlay incelemesi + lezyon eşleştirme (r = 0.074 farkını vaka bazında açıklamak için).
+6. ⬜ Makale tabloları ve şekilleri.
+
 ---
 
 *İlgili belgeler: `PROJE_TAM_DURUM.md`, `kod_zayifliklari.md`, `savunulabilirlik_notu.md`, `pipeline/README.md`.*
