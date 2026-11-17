@@ -105,6 +105,13 @@ def load_references(path: str) -> list[reference.ReferenceMeasurement]:
     return _kohort_to_refs(str(alt))
 
 
+# Rapor kıyasından dışlanan modeller. Gemini günlük kota duvarı nedeniyle yalnız
+# birkaç vakada koştu (n=6/80) -> ortalamalar yanıltıcı. Env ile değiştirilebilir:
+# RADYOLOG_EXCLUDE_MODELS="" verilirse hiçbiri dışlanmaz.
+EXCLUDE_MODELS = {m.strip() for m in os.environ.get(
+    "RADYOLOG_EXCLUDE_MODELS", "Gemini").split(",") if m.strip()}
+
+
 def pipeline_diameter(fnd: dict[str, Any]) -> float:
     """Pipeline'ın hedef çapı (RAW tercih). Lezyon yoksa 0.0 (= negatif karar)."""
     enb = fnd.get("en_buyuk_cap_lezyon")
@@ -350,6 +357,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         ref_org = " . ".join(organ_sentences(rad_text.get(s, ""), organ)) if organ else ""
         for p in sorted(glob.glob(os.path.join(a.reports, f"{ad}__*.txt"))):
             model = os.path.splitext(os.path.basename(p))[0].split("__")[-1]
+            if model in EXCLUDE_MODELS:
+                continue
             with open(p, "r", encoding="utf-8") as f:
                 text = f.read()
             pos, mm = report_claims(text)

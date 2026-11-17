@@ -60,6 +60,12 @@ def main(dosyalar: list[str] | None = None) -> None:
         bilinmeyen = istenen - set(reporting.MODELS)
         if bilinmeyen:
             print(f"⚠️  Bilinmeyen model etiketi yok sayıldı: {sorted(bilinmeyen)}")
+    # Varsayılan dışlama: Gemini (günlük kota -> eksik koşu). Kapatmak için
+    # RADYOLOG_EXCLUDE_MODELS="" ver.
+    exclude = {m.strip() for m in os.environ.get(
+        "RADYOLOG_EXCLUDE_MODELS", "Gemini").split(",") if m.strip()}
+    if exclude:
+        models = {k: v for k, v in models.items() if k not in exclude}
     print(f"🧪 Koşulacak modeller: {list(models)}")
     if dosyalar:
         paths = [d if os.path.isabs(d) else os.path.join(FINDINGS_DIR, d) for d in dosyalar]
