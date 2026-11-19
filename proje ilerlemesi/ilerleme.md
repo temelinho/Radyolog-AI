@@ -179,13 +179,65 @@ Drive kökü `MyDrive/Radyolog-AI-2`. İlk gerçek koşuda üç tuzak çıktı v
 - **Gemini değerlendirme dışı:** ücretsiz katman bu model için günde 20 istek veriyor, ayrıca sürekli 503 alındı. Ücretli katman 1.500 TRY ön ödeme istediği için açılmadı.
 - Sayısal sadakat, raporun **verilen** sayıları doğru bağlamda aktarıp aktarmadığını ölçer. Raporun klinik doğruluğunu ölçmez; o adım radyolog raporu kıyasıdır.
 
-## 17. GÜNCEL NEREDE KALDIK (12 Kasım)
+## 17. Radyolog referansıyla kıyas (`compare_reference.py`, 17–19 Kasım)
+
+Referans: `protocol/kohort_80_liste.csv` (grup Tumor/Normal + radyolog çapı `cap_mm`).
+Rapor metinleri: `reports_final.xlsx` (Findings). Çıktılar Drive'da `outputs/`.
+API ve GPU kullanılmaz. Gemini, kota nedeniyle (6/80) tüm kıyaslardan dışlandı.
+
+### 17.1 Tespit (vaka düzeyi, pipeline: herhangi bir lezyon)
+| | Duyarlılık [%95 GA] | Özgüllük [%95 GA] | PPV | NPV |
+|---|---|---|---|---|
+| Tümü (n=80) | 0.80 [0.65–0.90] | 0.68 [0.52–0.80] | 0.71 | 0.77 |
+| Karaciğer (n=40) | 0.95 [0.76–0.99] | 0.50 [0.30–0.70] | 0.66 | 0.91 |
+| Pankreas (n=40) | 0.65 [0.43–0.82] | 0.85 [0.64–0.95] | 0.81 | 0.71 |
+
+İki organ zıt profil: karaciğerde aşırı segmentasyon (yanlış alarm), pankreasta eksik segmentasyon (kaçan tümör). ≥10 mm eşiğinde sonuçlar benzer.
+
+### 17.2 Çap uyumu (POS vakalar; 32 eşleşen, 8 kaçan)
+Eşleştirme politikası: pipeline'ın en büyük çaplı lezyonu ile radyoloğun ölçtüğü lezyon. Koordinat olmadığı için garantili aynı-lezyon eşleşmesi değildir.
+
+| | n | MAE | Medyan hata | Yanlılık | r | ≤5/10/20 mm |
+|---|---|---|---|---|---|---|
+| Tümü | 32 | 39.1 | 14.1 | −9.2 | 0.07 | 8 / 12 / 18 |
+| Karaciğer | 19 | 47.6 | 13.3 | +2.8 | −0.02 | 6 / 8 / 11 |
+| Pankreas | 13 | 26.7 | 17.1 | −26.7 | 0.34 | 2 / 4 / 7 |
+| QC geçti (≤10 bileşen) | 27 | 27.1 | 10.4 | −20.7 | 0.30 | 8 / 12 / 18 |
+| QC kaldı (>10 bileşen) | 5 | 104.2 | 100.3 | +53.2 | −0.45 | 0 / 0 / 0 |
+
+- QC katmanı radyoloğa bakmadan tanımlandı, ama eşik veri görüldükten sonra seçildiği için **keşifsel**.
+- Parçalı maskeler büyük ölçüyor (aşırı segmentasyon); temiz maskeler de sistematik olarak küçük ölçüyor (eksik segmentasyon, özellikle pankreas).
+- Hedef olarak en büyük hacimli lezyonun seçilmesi sonucu değiştirmedi (MAE 38.5).
+- Kök neden `scripts/inspect_masks.py` ile maske düzeyinde doğrulandı (etiket hatası yok).
+
+### 17.3 Rapor kıyası (model raporu ile radyolog)
+| Model | Duy. | Özg. | Rapordaki çap MAE (n=32) | ROUGE-L | Organ adı doğru | Organ karışıklığı |
+|---|---|---|---|---|---|---|
+| Template | 0.80 | 0.675 | 39.1 | 0.074 | 0/80* | 0/80 |
+| Claude | 0.80 | 0.675 | 37.1 | 0.076 | 80/80 | 0/80 |
+| Gemma | 0.80 | 0.675 | 38.8 | 0.105 | 80/80 | 0/80 |
+| Llama | 0.80 | 0.675 | 38.5 | 0.123 | 80/80 | 0/80 |
+| Qwen | 0.80 | 0.675 | 37.2 | 0.090 | 49/80 | **21/80** |
+
+\* Şablon organ adını Türkçe yazar ("karaciger parenchyma").
+
+- **Dört LLM'in lezyon beyanı pipeline ile birebir aynı.** Lezyon uydurma yok; tespit doğruluğunu segmentasyon belirliyor.
+- **Organ karışıklığı:** İstem organ adını Türkçe verdi (`Organ: karaciger`). Qwen karaciğer vakalarının 21/40'ında organı başka organ olarak yazdı (ör. "right kidney (karaciger)"); pankreasta 0/40. Sayısal sadakat metriği bunu yakalamaz, çünkü sayılar doğru aktarılmıştır.
+- ROUGE-L düşük (0.07–0.12). Radyolog farklı kelimelerle anlatıyor; yalnız ikincil metrik.
+- Ayıklayıcı doğrulaması: ilk koşudaki 19 "yanlış-pozitif" beyanın hepsi ayıklayıcı hatasıydı (damar cümleleri, "0 lesions", varsayımsal cümleler). Gerçek cümlelerden regresyon testleri `tests/test_compare_reference.py`.
+
+### 17.4 Yöntemsel dersler
+- Alt kümeler sonuca göre seçilmez (bkz. 15.3).
+- Kural tabanlı ayıklayıcı her yeni modelin gerçek cümleleriyle doğrulanmalı.
+- LLM'e giden girdi, raporun diliyle aynı dilde olmalı.
+
+## 18. GÜNCEL NEREDE KALDIK (19 Kasım)
 1. ✅ Segmentasyon 80/80, ölçüm 80/80.
-2. ✅ Raporlama: 5 model × 80 vaka = 400 rapor + sadakat skoru.
-3. ⬜ **Sıradaki:** üretilen raporları gerçek radyolog raporlarıyla kıyas (`evaluation.py` + `matching.py` + `reference.py`).
-4. ⬜ Llama/Gemma'nın hangi tür sayıyı kaçırdığının dökümü (`karsilastirma.json` → `missing`).
-5. ⬜ Overlay incelemesi + lezyon eşleştirme (r = 0.074 farkını vaka bazında açıklamak için).
-6. ⬜ Makale tabloları ve şekilleri.
+2. ✅ Raporlama: 5 model × 80 vaka (Gemini dışlandı).
+3. ✅ Radyolog kıyası: tespit, çap uyumu, rapor kıyası.
+4. ⏳ **Makale yazımı:** Yöntem → Bulgular → Tartışma → Giriş → Öz (`makale/`).
+5. ⬜ (İsteğe bağlı) Llama/Gemma'nın kaçırdığı sayı türlerinin dökümü.
+6. ⬜ (İleride) 10–15 vakada referans maske ile gerçek Dice.
 
 ---
 
