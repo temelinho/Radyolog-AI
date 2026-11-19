@@ -72,7 +72,7 @@ ONERI_RE = (r"\b(recommend\w*|consider\w*|advis\w*|suggest\w*\s+(?:further|addit
             r"additional\s+(?:imaging|evaluation|assessment|techniques?)|follow[\s-]?up|should|"
             r"if\s+(?:clinical|there)|to\s+(?:assess|evaluate|determine|characteri[sz]e|exclude|"
             r"rule\s+out|confirm|clarify)|assess(?:ed|ment)?\s+for|correlat\w*|tumou?r\s+board|"
-            r"multidisciplinary)\b")
+            r"multidisciplinary|required|necessary|needed|warrant\w*)\b")
 
 SAYI_KELIME = {1: "one|single|solitary", 2: "two", 3: "three", 4: "four", 5: "five",
                6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
@@ -126,16 +126,41 @@ def _yakin(a: float, b: float) -> bool:
     return abs(a - b) <= max(0.6, 0.05 * max(abs(a), abs(b)))
 
 
-def dayanaksiz_sayilar(text: str, mf: dict[str, Any]) -> list[str]:
+def turetilmis_degerler(mf: dict[str, Any]) -> list[float]:
+    """Anlamlı türetilmiş HACİMLER: toplam tümör hacmi ile lezyon hacimleri arasındaki
+    fark (ör. "kalan lezyonlar 3.25 cm3"). JSON'da yazılı değildir ama verilen sayılardan
+    hesaplanmıştır: UYDURMA DEĞİL. Uzunluk/açı kombinasyonları anlamsız olduğu için yok."""
+    tot = mf.get("total_tumor_volume_cm3")
+    if not tot:
+        return []
+    out = []
+    for k in ("largest_lesion_by_diameter", "largest_lesion_by_volume"):
+        v = (mf.get(k) or {}).get("volume_cm3")
+        if v is not None and tot - v > 0:
+            out.append(round(tot - v, 4))
+    return out
+
+
+def _tam(a: float, b: float) -> bool:
+    # Hesaplanan değer için dar tolerans (yuvarlama payı): max(0.05, %3)
+    return abs(a - b) <= max(0.05, 0.03 * max(abs(a), abs(b)))
+
+
+def dayanaksiz_sayilar(text: str, mf: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """(uydurma sayılar, türetilmiş sayılar). Türetilmiş = JSON değerlerinin farkı/toplamı."""
     izin = izinli_degerler(mf)
-    bulunan = []
+    turev = turetilmis_degerler(mf)
+    uydurma, turetilmis = [], []
     for s in _cumleler(text):
         for m in evaluation.extract_measurements(s):
             if m.category not in izin:
                 continue
-            if not any(_yakin(m.value, v) for v in izin[m.category]):
-                bulunan.append(f"{m.raw_text} ⟨{s[:160]}⟩")
-    return bulunan
+            if any(_yakin(m.value, v) for v in izin[m.category]):
+                continue
+            hedef = (turetilmis if m.category == "volume" and any(_tam(m.value, v) for v in turev)
+                     else uydurma)
+            hedef.append(f"{m.raw_text} ⟨{s[:160]}⟩")
+    return uydurma, turetilmis
 
 
 def _terim_cumleleri(text: str, pattern: str) -> list[str]:
@@ -172,7 +197,7 @@ def eksik_lezyon_sayisi(text: str, mf: dict[str, Any]) -> bool:
 
 def denetle(text: str, mf: dict[str, Any], findings: dict[str, Any]) -> dict[str, Any]:
     organ = mf.get("organ")
-    sayi = dayanaksiz_sayilar(text, mf)
+    sayi, turetilmis = dayanaksiz_sayilar(text, mf)
     tani = _terim_cumleleri(text, TANI_RE)
     konum = _terim_cumleleri(text, KONUM_RE.get(organ, r"$^") + "|" + MORFOLOJI_RE)
     faz = _terim_cumleleri(text, FAZ_RE) if mf.get("imaging_phase") is None else []
@@ -181,16 +206,18 @@ def denetle(text: str, mf: dict[str, Any], findings: dict[str, Any]) -> dict[str
     return {
         "ek_sayi": len(sayi), "ek_tani": int(bool(tani)), "ek_konum_morfoloji": int(bool(konum)),
         "ek_faz": int(bool(faz)), "ek_rezektabilite": int(bool(rez)),
+        "turetilmis_sayi": len(turetilmis),   # bilgi amaçlı; ekleme SAYILMAZ
         "eksik_sayisal": len(fid.missing),
         "eksik_boyut_kategorisi": int(eksik_boyut_kategorisi(text, mf)),
         "eksik_lezyon_sayisi": int(eksik_lezyon_sayisi(text, mf)),
         "eksik_organ_adi": int(not C.organ_naming(text, organ)[0]),
-        "_ornek": {"sayi": sayi[:2], "tani": tani[:2], "konum_morfoloji": konum[:2],
+        "_ornek": {"sayi": sayi[:2], "turetilmis_sayi": turetilmis[:2],
+                   "tani": tani[:2], "konum_morfoloji": konum[:2],
                    "faz": faz[:2], "rezektabilite": rez[:2]},
     }
 
 
-def kor_ornek(tum, out: Path, k: int = 3, seed: int = 42) -> None:
+def kor_ornek(tum, out: Path, k: int = 5, seed: int = 42) -> None:
     """Elle doğrulama için KÖR örneklem: her (kategori, model) için en fazla k işaretli
     cümle, sabit seed ile rastgele. Model adı ayrı anahtar dosyasında; değerlendirici
     yalnız cümleyi ve kategoriyi görür, 'karar' sütununu doldurur (dogru / yanlis_alarm)."""
@@ -198,7 +225,7 @@ def kor_ornek(tum, out: Path, k: int = 3, seed: int = 42) -> None:
     rnd = random.Random(seed)
     grup = collections.defaultdict(list)
     for model, ad, kat, x in tum:
-        if model != "Template":
+        if model != "Template" and kat != "turetilmis_sayi":   # türetilmiş ekleme değil
             grup[(kat, model)].append((ad, x))
     secim = []
     for key in sorted(grup):
@@ -262,6 +289,7 @@ def main() -> int:
                "herhangi_ekleme_%": round(100 * sum(1 for x in rs if any(x[k] for k in EK)) / n, 1)}
         for k in EK:
             row[f"{k}_%"] = round(100 * sum(1 for x in rs if x[k]) / n, 1)
+        row["turetilmis_sayi_%"] = round(100 * sum(1 for x in rs if x["turetilmis_sayi"]) / n, 1)
         row["herhangi_eksik_%"] = round(100 * sum(1 for x in rs if any(x[k] for k in EKSIK)) / n, 1)
         for k in EKSIK:
             row[f"{k}_%"] = round(100 * sum(1 for x in rs if x[k]) / n, 1)
@@ -273,10 +301,10 @@ def main() -> int:
     kor_ornek(tum, out)
     print(f"rapor: {len(satirlar)} | çıktı: {out}\n")
     print("DAYANAKSIZ EKLEME (% rapor)")
-    print(f"  {'model':16}{'herhangi':>9}{'sayı':>7}{'tanı':>7}{'konum/morf':>11}{'faz':>6}{'rezek.':>8}")
+    print(f"  {'model':16}{'herhangi':>9}{'sayı':>7}{'tanı':>7}{'konum/morf':>11}{'faz':>6}{'rezek.':>8}{'| türetilmiş':>13}")
     for o in ozet:
         print(f"  {o['model']:16}{o['herhangi_ekleme_%']:>9}{o['ek_sayi_%']:>7}{o['ek_tani_%']:>7}"
-              f"{o['ek_konum_morfoloji_%']:>11}{o['ek_faz_%']:>6}{o['ek_rezektabilite_%']:>8}")
+              f"{o['ek_konum_morfoloji_%']:>11}{o['ek_faz_%']:>6}{o['ek_rezektabilite_%']:>8}{o['turetilmis_sayi_%']:>13}")
     print("\nEKSİK BULGU (% rapor)")
     print(f"  {'model':16}{'herhangi':>9}{'sayısal':>9}{'boyut kat.':>11}{'lez. sayısı':>12}{'organ adı':>10}")
     for o in ozet:

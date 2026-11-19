@@ -134,5 +134,23 @@ class TestRealSentencesRound2(unittest.TestCase):
         self.assertEqual(self._r("The tumor is borderline resectable.")["ek_rezektabilite"], 1)
 
 
+class TestRealSentencesRound3(unittest.TestCase):
+    def _r(self, t):
+        f, mf = _liver()
+        return A.denetle(t, mf, f)
+
+    def test_derived_number_is_not_invented(self):
+        # toplam 45.32 - en büyük 42.07 = 3.25 cm3
+        r = self._r("By subtraction, the remaining lesions account for approximately 3.25 cm3.")
+        self.assertEqual((r["ek_sayi"], r["turetilmis_sayi"]), (0, 1))
+
+    def test_required_confirmation_is_recommendation(self):
+        r = self._r("Histopathological confirmation would be required for any suspected malignancy.")
+        self.assertEqual(r["ek_tani"], 0)
+
+    def test_real_diagnosis_still_caught(self):
+        self.assertEqual(self._r("The findings are consistent with multifocal liver metastases.")["ek_tani"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
