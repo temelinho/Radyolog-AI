@@ -134,8 +134,12 @@ Drive kökü `MyDrive/Radyolog-AI-2`. İlk gerçek koşuda üç tuzak çıktı v
 
 ### 15.3 Uçtan uca doğrulama (radyolog çapı ile)
 - Tüm tümör vakalarında: **r = 0.074, MAE 39 mm, 40 tümörün 8'i tamamen kaçmış.**
-- Segmentasyonun tümörü tuttuğu 18 vakada: **MAE 7 mm, r = 0.96.**
-- Yorum: ölçüm kodu doğru, sınırlayan şey zero-shot segmentasyon (hem kaçırıyor hem yanlış-pozitif üretiyor). Makalede bu şekilde raporlanacak.
+- Hata dağılımı: medyan 14 mm; ≤5 mm 8/40, ≤10 mm 12/40, ≤20 mm 18/40.
+- ~~Segmentasyonun tümörü tuttuğu 18 vakada: MAE 7 mm, r = 0.96~~ → **makalede KULLANILMAZ.** Bu 18 vaka, radyolog çapına ≤20 mm yakın oldukları için seçildi; yani alt küme sonuca göre tanımlandı (döngüsel). Yalnızca betimleyici hata dağılımı olarak verilebilir.
+- **Kohort seçimi bundan etkilenmez:** 80 vaka tabakalı rastgele seçildi (sabit seed, bkz. bölüm 2 ve 8); hiçbir vaka sonuca bakılarak seçilmedi. Sorun yalnızca sonradan tanımlanan bu alt kümede.
+- Doğru alt küme analizi: radyoloğa **bakmadan** tanımlanan bir segmentasyon kalite bayrağı (QC; ör. tümör/organ hacim oranı, lezyon sayısı, olası olmayan boyut) ile "QC'yi geçen / geçmeyen" ayrımı.
+- Eşleştirme sınırı: radyolog raporlarında lezyon koordinatı yok; pipeline'ın **en büyük lezyonu** radyoloğun ölçtüğü lezyonla karşılaştırılıyor. Bu, garantili aynı-lezyon eşleşmesi değil, beyan edilen bir politikadır (`matching.py`).
+- Yorum: ölçüm kodu doğru (fantom); uçtan uca doğruluk zero-shot segmentasyonla sınırlı (hem kaçırıyor hem yanlış-pozitif üretiyor). Makalede iddia bununla sınırlı tutulacak.
 
 ### 15.4 Codex bulguları (commit `92253cf`)
 - `.meta.json` cache dosyaları vaka sanılıyordu (80 yerine 160 girdi) → elendi.
