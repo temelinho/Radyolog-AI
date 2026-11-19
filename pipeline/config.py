@@ -26,6 +26,24 @@ SCHEMA_VERSION = "2.0.0"
 PIPELINE_VERSION = "2.0.1"
 PROMPT_VERSION = "2.0.0"
 
+# ---------------------------------------------------------------------------
+# Modele ve rapora giden değerlerin İNGİLİZCE adları. Bulgu dosyalarında anahtarlar
+# Türkçe kalır (cache bozulmasın); yalnız LLM'e/rapora yazılırken çevrilir.
+# ---------------------------------------------------------------------------
+ORGAN_EN = {"karaciger": "liver", "karaciğer": "liver", "liver": "liver",
+            "pankreas": "pancreas", "pancreas": "pancreas"}
+VESSEL_EN = {"aorta": "aorta",
+             "portal_ven": "portal vein and splenic vein",
+             "vci": "inferior vena cava (IVC)"}
+
+
+def organ_en(name: str | None) -> str:
+    return ORGAN_EN.get((name or "").strip().lower(), name or "unknown")
+
+
+def vessel_en(name: str | None) -> str:
+    return VESSEL_EN.get((name or "").strip().lower(), (name or "").replace("_", " "))
+
 
 # ---------------------------------------------------------------------------
 # Kök dizin çözümü — Colab/Drive öncelikli (C9, F11)
@@ -59,7 +77,10 @@ class Layout:
     @property
     def findings(self) -> Path: return self.base / "findings"         # bulgular.json
     @property
-    def reports(self) -> Path: return self.base / "reports"           # LLM raporları
+    def reports(self) -> Path:                                         # LLM raporları
+        # RADYOLOG_REPORTS_DIR: yeni bir rapor setini ayrı klasöre yazmak için
+        # (ör. İngilizce girdiyle yeniden üretim -> reports_en). Boşsa base/reports.
+        return Path(os.environ.get("RADYOLOG_REPORTS_DIR") or (self.base / "reports"))
     @property
     def outputs(self) -> Path: return self.base / "outputs"           # değerlendirme/tablolar
     @property

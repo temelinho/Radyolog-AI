@@ -74,5 +74,26 @@ class TestIntegrationTemplateFidelity(unittest.TestCase):
         self.assertEqual(fid.ratio, 1.0)
 
 
+class TestPromptIsEnglish(unittest.TestCase):
+    """Modele ve şablona giden değerler İngilizce olmalı (Türkçe 'karaciger'
+    Qwen'de organ karışıklığına yol açtı: 'right kidney (karaciger)')."""
+
+    def test_no_turkish_values(self):
+        import re
+        summary = {"lezyon_sayisi": 1, "toplam_tumor_hacim_cm3": 8.4,
+                   "en_buyuk_cap_lezyon": {"id": 1, "cap_mm": 20.0, "hacim_cm3": 8.4},
+                   "en_buyuk_hacim_lezyon": {"id": 1, "cap_mm": 20.0, "hacim_cm3": 8.4},
+                   "status": "success"}
+        vessels = {"aorta": {"mesafe_mm": 28.4, "sarma_derece": 0},
+                   "portal_ven": {"mesafe_mm": 5.0, "sarma_derece": 0},
+                   "vci": {"mesafe_mm": 47.2, "sarma_derece": None}}
+        for organ, en in (("karaciger", "liver"), ("pankreas", "pancreas")):
+            f = REP.build_findings(organ=organ, summary=summary, vessels=vessels)
+            text = REP.build_prompt(f) + "
+" + REP.template_report(f)
+            self.assertIn(en, text)
+            self.assertIsNone(re.search(r"karaci|pankreas|portal ven|vci", text, re.I))
+
+
 if __name__ == "__main__":
     unittest.main()

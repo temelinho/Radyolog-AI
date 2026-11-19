@@ -92,7 +92,7 @@ def build_prompt(findings: dict[str, Any]) -> str:
     """
     f = anonymize_findings(findings)   # güvenlik: yalnız izinli (klinik) alanlar
     L = ["CT segmentation findings — use ONLY these values, invent nothing:"]
-    L.append(f"- Organ: {f.get('organ', 'unknown')}")
+    L.append(f"- Organ: {config.organ_en(f.get('organ'))}")
     n = f.get("lezyon_sayisi")
     L.append(f"- Number of lesions: {'not assessed' if n is None else n}")
     tv = f.get("toplam_tumor_hacim_cm3")
@@ -116,7 +116,7 @@ def build_prompt(findings: dict[str, Any]) -> str:
             a = vi.get("sarma_derece")
             ds = f"distance {d} mm" if d is not None else "distance not assessed"
             as_ = f"encasement angle {a} degrees" if a is not None else "encasement not assessed"
-            L.append(f"    - {vn.replace('_', ' ')}: {ds}, {as_}")
+            L.append(f"    - {config.vessel_en(vn)}: {ds}, {as_}")
     bk = f.get("boyut_kategorisi")
     if isinstance(bk, dict) and bk.get("kategori"):
         L.append(f"- Size category (size only, NOT a T-stage): {bk['kategori']}")
@@ -127,7 +127,7 @@ def build_prompt(findings: dict[str, Any]) -> str:
 # Kural-tabanlı şablon (set 6) — %100 sadık baseline, API gerektirmez
 # ---------------------------------------------------------------------------
 def template_report(findings: dict[str, Any]) -> str:
-    organ = findings.get("organ", "organ")
+    organ = config.organ_en(findings.get("organ"))
     n = findings.get("lezyon_sayisi", 0)
     enb = findings.get("en_buyuk_cap_lezyon") or {}
     faz = findings.get("goruntuleme") or "unknown"
@@ -154,13 +154,13 @@ def template_report(findings: dict[str, Any]) -> str:
         L += ["", "3. VASCULAR"]
         for v in vask:
             if v.get("durum") == "değerlendirilemez":
-                L.append(f"{v['damar'].replace('_', ' ')}: not assessed.")
+                L.append(f"{config.vessel_en(v['damar'])}: not assessed.")
                 continue
             m = v.get("mesafe_mm")
             d = v.get("sarma_derece")
             m_s = "not measured" if m is None else f"{m} mm"
             d_s = "not measured" if d is None else f"{d} degrees"
-            L.append(f"{v['damar'].replace('_', ' ')}: distance {m_s}, "
+            L.append(f"{config.vessel_en(v['damar'])}: distance {m_s}, "
                      f"encasement {d_s} (research-grade).")
     # Size category
     bk = findings.get("boyut_kategorisi", {})

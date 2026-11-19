@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import config
+
 # ---------------------------------------------------------------------------
 # Metin ayrıştırma — ondalık koruyan (F17)
 # ---------------------------------------------------------------------------
@@ -105,7 +107,9 @@ def findings_to_facts(findings: dict[str, Any]) -> list[Fact]:
     for vname, vinfo in damar.items() if isinstance(damar, dict) else []:
         if not isinstance(vinfo, dict):
             continue
-        kw = [vname.replace("_", " "), *vname.split("_")]
+        kw = [vname.replace("_", " "), *vname.split("_"),
+              config.vessel_en(vname), *config.vessel_en(vname).replace("(", " ")
+              .replace(")", " ").split()]
         if vinfo.get("mesafe_mm") is not None:
             facts.append(Fact(f"{vname}_mesafe", "length", float(vinfo["mesafe_mm"]),
                               kw + ["mesafe", "distance", "temas", "contact", "abut"]))
