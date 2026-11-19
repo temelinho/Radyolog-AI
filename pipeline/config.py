@@ -24,7 +24,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 SCHEMA_VERSION = "2.0.0"
 PIPELINE_VERSION = "2.0.1"
-PROMPT_VERSION = "2.0.0"
+PROMPT_VERSION = "2.0.0"          # ölçüm önbellek anahtarında kullanılır (runner.cache_key)
+REPORT_PROMPT_VERSION = "3.0.0"   # rapor istemi/JSON şeması; değişince yeni deney klasörü
 
 # ---------------------------------------------------------------------------
 # Modele ve rapora giden değerlerin İNGİLİZCE adları. Bulgu dosyalarında anahtarlar
@@ -78,9 +79,10 @@ class Layout:
     def findings(self) -> Path: return self.base / "findings"         # bulgular.json
     @property
     def reports(self) -> Path:                                         # LLM raporları
-        # RADYOLOG_REPORTS_DIR: yeni bir rapor setini ayrı klasöre yazmak için
-        # (ör. İngilizce girdiyle yeniden üretim -> reports_en). Boşsa base/reports.
-        return Path(os.environ.get("RADYOLOG_REPORTS_DIR") or (self.base / "reports"))
+        # Aktif rapor deneyi. compare_llm (üretim) ve compare_reference (kıyas) AYNI
+        # yeri kullanır. Eski set için: RADYOLOG_REPORTS_DIR=<base>/reports
+        d = os.environ.get("RADYOLOG_REPORTS_DIR") or os.environ.get("RADYOLOG_REPORTS")
+        return Path(d) if d else self.base / "reports_en_json_v3"
     @property
     def outputs(self) -> Path: return self.base / "outputs"           # değerlendirme/tablolar
     @property

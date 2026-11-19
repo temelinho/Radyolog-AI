@@ -285,11 +285,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     ap.add_argument("--reports", default=str(config.LAYOUT.reports))
     ap.add_argument("--reference", default=str(config.LAYOUT.reference))
     ap.add_argument("--reports-xlsx", default=os.environ.get("RADYOLOG_REPORTS_XLSX"))
-    ap.add_argument("--out", default=str(config.LAYOUT.outputs))
+    ap.add_argument("--out", default=None,
+                    help="varsayılan: outputs/<rapor klasörünün adı>")
     ap.add_argument("--threshold", type=float, default=10.0)
     a = ap.parse_args(argv)
 
-    out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
+    out = Path(a.out) if a.out else config.LAYOUT.outputs / Path(a.reports).name
+    out.mkdir(parents=True, exist_ok=True)
+    print(f"raporlar: {a.reports}\nçıktı: {out}")
     refs = reference.index_by_study(load_references(a.reference))
     cases = load_findings(a.findings)
     ortak = sorted(set(refs) & set(cases))

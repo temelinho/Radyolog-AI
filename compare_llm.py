@@ -30,7 +30,7 @@ except ImportError:
 from pipeline import config, reporting, evaluation
 
 FINDINGS_DIR = os.environ.get("RADYOLOG_FINDINGS", str(config.LAYOUT.findings))
-OUTPUT_DIR = str(config.LAYOUT.reports)
+OUTPUT_DIR = str(config.LAYOUT.reports)   # compare_reference ile AYNI klasör
 
 
 def _load_findings(path: str) -> dict | None:
@@ -61,6 +61,10 @@ def _kosullari_kaydet(models: dict) -> None:
                 kayit = json.load(f)
         except Exception:
             kayit = {}
+    if kayit and kayit.get("prompt_version") != reporting.config.REPORT_PROMPT_VERSION:
+        raise RuntimeError("Output directory belongs to another prompt version. "
+                           "Set RADYOLOG_REPORTS_DIR to a new experiment directory.")
+    kayit["prompt_version"] = reporting.config.REPORT_PROMPT_VERSION
     kayit["system_prompt_sha256"] = hashlib.sha256(
         reporting.SYSTEM_PROMPT.encode("utf-8")).hexdigest()
     kayit["gen"] = reporting.GEN
@@ -116,7 +120,9 @@ def main(dosyalar: list[str] | None = None) -> None:
         # Model-model koşuda (her çağrı tek model) ÖNCEKİ modellerin sonuçlarını EZME:
         # varsa mevcut karşılaştırmayı yükle, üstüne bu koşunun modelini ekle.
         kpath = os.path.join(OUTPUT_DIR, f"{ad}__karsilastirma.json")
-        karsilastirma = {"hasta": ad, "bulgular": findings, "raporlar": {}, "sadakat": {}}
+        karsilastirma = {"hasta": ad, "bulgular": findings,
+                         "model_input": reporting.model_findings(findings),
+                         "raporlar": {}, "sadakat": {}}
         if os.path.exists(kpath):
             try:
                 with open(kpath, "r", encoding="utf-8") as f:
@@ -131,7 +137,21 @@ def main(dosyalar: list[str] | None = None) -> None:
             # DEVAM ETTİRME: bu model+vaka zaten üretildiyse API'yi TEKRAR çağırma.
             # Kota korunur (Gemini vb. günlük limit); kayıtlı metinden sadakat yeniden
             # hesaplanır, böylece ozet.csv tam kalır. Yeniden-üretmek istersen .txt'yi sil.
-            cached = os.path.exists(out_txt) and os.path.getsize(out_txt) > 0
+            identity = reporting.request_identity(cfg["provider"], cfg["model"],
+                                                  reporting.SYSTEM_PROMPT, prompt)
+            record_path = out_txt[:-4] + ".uretim.json"
+            cached = False
+            if os.path.exists(out_txt) and os.path.getsize(out_txt) > 0:
+                try:
+                    with open(record_path, encoding="utf-8") as f:
+                        previous = json.load(f)
+                    cached = (previous.get("request_sha256") == identity["request_sha256"])
+                except (OSError, ValueError):
+                    pass
+                if not cached:
+                    raise RuntimeError(
+                        f"Cached report has different or missing generation conditions: {out_txt}. "
+                        "Set RADYOLOG_REPORTS_DIR to a new experiment directory.")
             if cached:
                 with open(out_txt, "r", encoding="utf-8") as f:
                     text = f.read()
@@ -155,7 +175,7 @@ def main(dosyalar: list[str] | None = None) -> None:
                     f.write(text)
                 # Rapor başına üretim kaydı (bitiş nedeni, token, Claude'da düşünme bloğu var mı)
                 with open(out_txt[:-4] + ".uretim.json", "w", encoding="utf-8") as f:
-                    json.dump({"finish_reason": resp.finish_reason, "usage": resp.usage,
+                    json.dump({**identity, "finish_reason": resp.finish_reason, "usage": resp.usage,
                                "kosul": reporting.generation_conditions(cfg["provider"],
                                                                         cfg["model"])},
                               f, ensure_ascii=False, indent=2)

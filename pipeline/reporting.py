@@ -83,93 +83,118 @@ def anonymize_findings(findings: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in findings.items() if k in ALLOWED_FIELDS}
 
 
-def build_prompt(findings: dict[str, Any]) -> str:
-    """Modele giden istem: YALNIZ organ + klinik sayısal metrikler, İngilizce.
+def model_findings(findings: dict[str, Any]) -> dict[str, Any]:
+    """Canonical English clinical JSON shared by all report generators."""
+    f = anonymize_findings(findings)
+    organ = config.organ_en(f.get("organ"))
+    if organ not in ("liver", "pancreas"):
+        raise ValueError(f"Unsupported reporting organ: {organ!r}")
+    phase = (f.get("goruntuleme") or "").strip().lower()
+    phases = {
+        "": None, "bilinmiyor": None, "unknown": None, "not specified": None,
+        "portal venöz faz bt": "portal venous",
+        "portal venöz": "portal venous", "portal venous": "portal venous",
+        "arteriyel": "arterial", "arterial": "arterial",
+        "kontrastsız": "noncontrast", "noncontrast": "noncontrast",
+        "geç faz": "delayed", "delayed": "delayed",
+    }
+    if phase not in phases:
+        raise ValueError(f"Unrecognized imaging phase: {phase!r}")
 
-    Veri seti / segmentasyon modeli kimliği ve teknik meta VERİLMEZ (modele kaynak
-    sızdırmamak, yanlılık yaratmamak). Türkçe kategorik uyarı metinleri yerine
-    yalnız sayısal değerler sunulur; klinik çerçeveyi sistem promptu verir.
-    """
-    f = anonymize_findings(findings)   # güvenlik: yalnız izinli (klinik) alanlar
-    L = ["CT segmentation findings — use ONLY these values, invent nothing:"]
-    L.append(f"- Organ: {config.organ_en(f.get('organ'))}")
-    faz = (f.get("goruntuleme") or "").strip()
-    L.append("- Imaging phase / contrast: "
-             + ("not specified" if faz.lower() in ("", "bilinmiyor", "unknown") else faz))
-    n = f.get("lezyon_sayisi")
-    L.append(f"- Number of lesions: {'not assessed' if n is None else n}")
-    tv = f.get("toplam_tumor_hacim_cm3")
-    if tv is not None:
-        L.append(f"- Total tumor volume: {tv} cm3")
-    enb = f.get("en_buyuk_cap_lezyon")
-    if isinstance(enb, dict):
-        L.append(f"- Largest lesion by diameter: {enb.get('cap_mm')} mm diameter, "
-                 f"{enb.get('hacim_cm3')} cm3 volume")
-    env = f.get("en_buyuk_hacim_lezyon")
-    if isinstance(env, dict):
-        L.append(f"- Largest lesion by volume: {env.get('cap_mm')} mm diameter, "
-                 f"{env.get('hacim_cm3')} cm3 volume")
-    damar = f.get("damar") or {}
-    if isinstance(damar, dict) and damar:
-        L.append("- Vessels (research-grade):")
-        for vn, vi in damar.items():
-            if not isinstance(vi, dict):
-                continue
-            d = vi.get("mesafe_mm")
-            a = vi.get("sarma_derece")
-            ds = f"distance {d} mm" if d is not None else "distance not assessed"
-            as_ = f"encasement angle {a} degrees" if a is not None else "encasement not assessed"
-            L.append(f"    - {config.vessel_en(vn)}: {ds}, {as_}")
-    bk = f.get("boyut_kategorisi")
-    if isinstance(bk, dict) and bk.get("kategori"):
-        L.append(f"- Size category (size only, NOT a T-stage): {bk['kategori']}")
-    return "\n".join(L) + "\n\nWrite a standard radiology report in English."
+    def lesion(value):
+        if not isinstance(value, dict):
+            return None
+        return {"lesion_id": value.get("id"),
+                "axial_diameter_mm": value.get("cap_mm"),
+                "volume_cm3": value.get("hacim_cm3")}
+
+    vessels = {}
+    for name, value in sorted((f.get("damar") or {}).items()):
+        if name not in config.VESSEL_EN:
+            raise ValueError(f"Unrecognized vessel: {name!r}")
+        vessels[config.vessel_en(name)] = {
+            "distance_mm": value.get("mesafe_mm"),
+            "encasement_angle_deg": value.get("sarma_derece"),
+            "status": value.get("status", "not_assessed"
+                                if value.get("mesafe_mm") is None
+                                and value.get("sarma_derece") is None else "success"),
+        }
+    return {
+        "organ": organ,
+        "imaging_phase": phases[phase],
+        "lesion_count": f.get("lezyon_sayisi"),
+        "total_tumor_volume_cm3": f.get("toplam_tumor_hacim_cm3"),
+        "largest_lesion_by_diameter": lesion(f.get("en_buyuk_cap_lezyon")),
+        "largest_lesion_by_volume": lesion(f.get("en_buyuk_hacim_lezyon")),
+        "vessels": vessels,
+        "size_category": (f.get("boyut_kategorisi") or {}).get("kategori"),
+    }
+
+
+def build_prompt(findings: dict[str, Any]) -> str:
+    """Serialize identical English clinical JSON for every model."""
+    payload = json.dumps(model_findings(findings), ensure_ascii=False,
+                         sort_keys=True, indent=2, allow_nan=False)
+    return ("CT segmentation metrics (JSON):\n" + payload
+            + "\n\nWrite a standard radiology report in English.")
+
+
+def request_identity(provider: str, model: str, system_prompt: str,
+                     user_prompt: str) -> dict[str, Any]:
+    """Bind cached reports to the exact input and recorded settings."""
+    import hashlib
+    conditions = generation_conditions(provider, model)
+    text = build_input(system_prompt, user_prompt)
+    encoded = json.dumps({"input": text, "conditions": conditions},
+                         sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return {"request_sha256": hashlib.sha256(encoded).hexdigest(),
+            "input_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "conditions": conditions}
 
 
 # ---------------------------------------------------------------------------
 # Kural-tabanlı şablon (set 6) — %100 sadık baseline, API gerektirmez
 # ---------------------------------------------------------------------------
 def template_report(findings: dict[str, Any]) -> str:
-    organ = config.organ_en(findings.get("organ"))
-    n = findings.get("lezyon_sayisi", 0)
-    enb = findings.get("en_buyuk_cap_lezyon") or {}
-    faz = findings.get("goruntuleme") or "unknown"
-    if faz in ("bilinmiyor", "unknown", ""):
-        teknik = "CT study, phase not specified."
-    else:
-        teknik = f"{faz} CT study."
+    """Kural tabanlı KONTROL raporu. BDM değildir; üretim mekanizması farklıdır.
+    Yalnız modellere giden İngilizce klinik JSON'u (model_findings) kullanır,
+    böylece LLM'lerle AYNI klinik değerleri görür. Eksik değer (null) asla
+    "yok/0" olarak yazılmaz; "not assessed" yazılır."""
+    c = model_findings(findings)
+    organ = c["organ"]
+    n = c["lesion_count"]
+    big = c["largest_lesion_by_diameter"] or {}
+    phase = c["imaging_phase"]
+    teknik = ("CT study, phase not specified." if phase is None
+              else f"{phase.capitalize()} phase CT study.")
     L = ["1. TECHNIQUE", teknik, ""]
     L.append("2. FINDINGS")
-    if not n:
+    if n is None:
+        L.append(f"Lesion count in the {organ} was not assessed.")
+    elif n == 0:
         L.append(f"No measurable focal lesion detected in the {organ} parenchyma.")
     else:
         L.append(f"{n} lesion(s) observed in the {organ} parenchyma.")
-        if enb.get("cap_mm") is not None:
-            L.append(f"The largest lesion has an axial diameter of {enb['cap_mm']} mm.")
-        if enb.get("hacim_cm3") is not None:
-            L.append(f"The volume of this lesion is {enb['hacim_cm3']} cm3.")
-        tot = findings.get("toplam_tumor_hacim_cm3")
-        if tot:
+        if big.get("axial_diameter_mm") is not None:
+            L.append(f"The largest lesion has an axial diameter of {big['axial_diameter_mm']} mm.")
+        if big.get("volume_cm3") is not None:
+            L.append(f"The volume of this lesion is {big['volume_cm3']} cm3.")
+        tot = c["total_tumor_volume_cm3"]
+        if tot is not None:
             L.append(f"Total tumor volume is {tot} cm3.")
-    # Vascular
-    vask = (findings.get("vaskuler") or {}).get("damarlar", [])
-    if vask:
+    if c["vessels"]:
         L += ["", "3. VASCULAR"]
-        for v in vask:
-            if v.get("durum") == "değerlendirilemez":
-                L.append(f"{config.vessel_en(v['damar'])}: not assessed.")
+        for name, v in c["vessels"].items():
+            m, d = v.get("distance_mm"), v.get("encasement_angle_deg")
+            if m is None and d is None:
+                L.append(f"{name}: not assessed.")
                 continue
-            m = v.get("mesafe_mm")
-            d = v.get("sarma_derece")
             m_s = "not measured" if m is None else f"{m} mm"
             d_s = "not measured" if d is None else f"{d} degrees"
-            L.append(f"{config.vessel_en(v['damar'])}: distance {m_s}, "
-                     f"encasement {d_s} (research-grade).")
-    # Size category
-    bk = findings.get("boyut_kategorisi", {})
-    if bk.get("kategori"):
+            L.append(f"{name}: distance {m_s}, encasement {d_s} (research-grade).")
+    if c["size_category"]:
         L += ["", "4. SIZE CATEGORY",
-              f"Size category: {bk['kategori']} (size only, not a T-stage)."]
+              f"Size category: {c['size_category']} (size only, not a T-stage)."]
     L += ["", "5. IMPRESSION AND RECOMMENDATION",
           "Findings are based on segmentation measurements; histopathological "
           "confirmation is recommended."]
@@ -250,10 +275,10 @@ class LLMResponse:
 # ÜRETİM KOŞULLARI — TÜM MODELLER İÇİN TEK KAYNAK.
 # Claude Sonnet 5.5 örnekleme parametrelerini (temperature/top_p/top_k) kabul
 # etmez ve düşünmesi yalnız 'between_tools' ile kapatılabilir. Eşitlik bu yüzden
-# Claude'un SABİT koşuluna göre kurulur:
+# Ortak metin ve çıktı bütçesi aşağıda tanımlıdır:
 #   * Girdi: herkese BİREBİR AYNI tek kullanıcı mesajı (sistem istemi + vaka).
 #   * Düşünme: hepsinde KAPALI (Claude: between_tools; açık modellerde yok).
-#   * Örnekleme: hepsinde KESİLMEMİŞ dağılım. Claude: API varsayılanı (parametre
+#   * Örnekleme eşdeğerliği bilinmiyor. Claude: API varsayılanı (parametre
 #     gönderilmez). Açık modeller: temperature 1.0, top_p 1.0, top_k kapalı,
 #     repetition_penalty 1.0 — modelin kendi generation_config varsayılanları EZİLİR.
 #   * Uzunluk sınırı: hepsinde aynı.
@@ -277,15 +302,20 @@ def generation_conditions(provider: str, model: str) -> dict[str, Any]:
     """Bu sağlayıcıya GERÇEKTE uygulanan koşullar (kayıt/denetim için)."""
     base = {"provider": provider, "model": model,
             "input": "single user message = system prompt + case prompt",
-            "max_tokens": GEN["max_tokens"], "thinking": "off"}
+            "max_tokens": GEN["max_tokens"], "thinking": "off",
+            "input_format": "English clinical JSON",
+            "prompt_version": config.REPORT_PROMPT_VERSION,
+            "sampling_equivalence": "not established across providers"}
     if provider == "anthropic":
         base.update({"sampling": "API default (temperature/top_p/top_k not settable)",
-                     "thinking_param": {"type": "between_tools"}, "seed": None})
+                     "thinking_param": {"type": "between_tools"}, "seed": None,
+                     "precision": "not disclosed by provider"})
     elif provider == "local_hf":
         base.update({"sampling": "unmodified distribution",
                      "temperature": GEN["temperature"], "top_p": GEN["top_p"],
                      "top_k": GEN["top_k"], "repetition_penalty": GEN["repetition_penalty"],
-                     "seed": GEN["seed"], "quantization": "4-bit NF4"})
+                     "seed": GEN["seed"], "quantization": "4-bit NF4",
+                     "precision": "4-bit NF4 weights (bitsandbytes), fp16 compute"})
     elif provider == "google":
         base.update({"sampling": "unmodified distribution",
                      "temperature": GEN["temperature"], "top_p": GEN["top_p"]})
@@ -296,7 +326,7 @@ def generation_conditions(provider: str, model: str) -> dict[str, Any]:
 
 def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
              findings: dict[str, Any] | None = None) -> LLMResponse:
-    """Tüm modeller GEN koşullarıyla çağrılır; koşul parametre olarak DEĞİŞTİRİLEMEZ."""
+    """Use shared input and record provider-specific generation settings."""
     if provider == "template":
         return LLMResponse(template_report(findings or {}), provider, model,
                            finish_reason="stop")
