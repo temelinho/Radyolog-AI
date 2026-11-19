@@ -1,3 +1,5 @@
+> **ESKİ PLAN — GÜNCEL DEĞİL.** Bu dosya önceki plana göre yazıldı (6 organ, eşdeğer küre çapı, tek fold, Gemini vs Claude). Güncel Yöntem taslağı: `makale/02_yontem.md`.
+
 # YÖNTEM — Projenin Gerçek Bilgileriyle Doldurulmuş İçerik
 
 *Nasıl kullanılır: Aşağıdaki her blok, o alt başlıkta anlatılacak gerçek teknik bilgiyi içerir. Bunları kendi cümlelerinle yeniden yaz. Köşeli parantez [ ] içindekiler senin dolduracağın/karar vereceğin yerlerdir.*
