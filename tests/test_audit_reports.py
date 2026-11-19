@@ -94,5 +94,45 @@ class TestOmissions(unittest.TestCase):
                           r["eksik_organ_adi"]), (0, 0, 0))
 
 
+class TestRealSentencesRound2(unittest.TestCase):
+    """İlk gerçek koşuda görülen yanlış alarmlar (öneri cümleleri, HTML birim, e.g.)."""
+
+    def _r(self, t):
+        f, mf = _liver()
+        return A.denetle(t, mf, f)
+
+    def test_recommendations_are_not_additions(self):
+        for t in [
+            "Further imaging with a contrast-enhanced CT or MRI is recommended to assess for pancreatic pathology.",
+            "If clinical suspicion for hepatic pathology persists, consider dedicated multiphase contrast-enhanced imaging or MRI as clinically appropriate.",
+            "Histopathological confirmation is recommended to assess for malignancy.",
+            "The distance to major vessels should be cross-referenced to further evaluate for resectability.",
+            "Management decisions, including resectability, should be made in multidisciplinary tumor board discussion.",
+        ]:
+            r = self._r(t)
+            with self.subTest(t=t[:40]):
+                self.assertEqual((r["ek_faz"], r["ek_tani"], r["ek_rezektabilite"]), (0, 0, 0))
+
+    def test_eg_split_keeps_negation(self):
+        t = ("Lesion morphology, enhancement pattern, background liver parenchyma (e.g. cirrhosis) "
+             "and lesion location are not provided in the metrics.")
+        self.assertEqual(self._r(t)["ek_konum_morfoloji"], 0)
+
+    def test_html_superscript_volume(self):
+        r = self._r("The total tumor volume is 45.32 cm<sup>3</sup>.")
+        self.assertEqual(r["ek_sayi"], 0)
+
+    def test_zero_comparison_not_invented(self):
+        r = self._r("The distances from these vessels are all greater than 0 mm.")
+        self.assertEqual(r["ek_sayi"], 0)
+
+    def test_real_additions_still_caught(self):
+        self.assertEqual(self._r("Two hypodense liver lesions are present.")["ek_konum_morfoloji"], 1)
+        self.assertEqual(self._r("CT segmentation reveals a single enhancing lesion.")["ek_konum_morfoloji"], 1)
+        self.assertEqual(self._r("The segmentation identifies a significant hepatocellular neoplasm.")["ek_tani"], 1)
+        self.assertEqual(self._r("The largest lesion has a diameter of 24.88 mm.")["ek_sayi"], 1)
+        self.assertEqual(self._r("The tumor is borderline resectable.")["ek_rezektabilite"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

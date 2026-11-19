@@ -74,6 +74,11 @@ class TestFidelityRealReports(unittest.TestCase):
         fid = E.numeric_fidelity(wrong, f)
         self.assertIn("en_buyuk_cap", fid.missing)
 
+    def test_html_superscript_volume_supported(self):
+        t = GEMMA_REPORT.replace("45.32 cubic centimeters", "45.32 cm<sup>3</sup>")
+        fid = E.numeric_fidelity(t, _findings())
+        self.assertNotIn("toplam_hacim", fid.missing)
+
 
 class TestOrganConfusionVesselNames(unittest.TestCase):
     def test_splenic_vein_is_not_spleen(self):

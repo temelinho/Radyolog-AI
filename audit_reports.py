@@ -60,8 +60,19 @@ FAZ_RE = (r"\b(portal[\s-]+venous\s+(?:phase|contrast|imaging|acquisition)|arter
           r"late\s+arterial|delayed\s+phase|"
           r"contrast[\s-]+enhanced|non[\s-]?contrast|unenhanced|post[\s-]?contrast|"
           r"with\s+(?:iv\s+|intravenous\s+)?contrast)\b")
-REZ_RE = (r"\b(un)?resectab\w*|\bborderline\b|\binoperab\w*|\boperab\w*|"
-          r"\bT[1-4][abc]?\b|\bstage\s+(?:i{1,3}v?|iv|[1-4])\b")
+# Yalnız DURUM bildirimi: "resectable", "unresectable", "borderline resectable", T/evre.
+# "rezektabilite değerlendirilmeli" (resectability ...) sayılmaz.
+REZ_RE = (r"\b(?:un|non[\s-]?)?resectable\b|\bborderline\s+resectable\b|\binoperable\b|"
+          r"\boperable\b|\bT[1-4][abc]?\b|\bstage\s+(?:i{1,3}v?|iv|[1-4])\b")
+
+# Öneri / koşul / yönlendirme cümleleri bir BULGU İDDİASI değildir
+# ("further contrast-enhanced imaging is recommended", "to assess for malignancy").
+ONERI_RE = (r"\b(recommend\w*|consider\w*|advis\w*|suggest\w*\s+(?:further|additional|that)|"
+            r"further\s+(?:imaging|evaluation|assessment|characteri\w*|work[\s-]?up)|"
+            r"additional\s+(?:imaging|evaluation|assessment|techniques?)|follow[\s-]?up|should|"
+            r"if\s+(?:clinical|there)|to\s+(?:assess|evaluate|determine|characteri[sz]e|exclude|"
+            r"rule\s+out|confirm|clarify)|assess(?:ed|ment)?\s+for|correlat\w*|tumou?r\s+board|"
+            r"multidisciplinary)\b")
 
 SAYI_KELIME = {1: "one|single|solitary", 2: "two", 3: "three", 4: "four", 5: "five",
                6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
@@ -69,8 +80,21 @@ SAYI_KELIME = {1: "one|single|solitary", 2: "two", 3: "three", 4: "four", 5: "fi
 ESIK_MM = {"liver": [20.0, 50.0], "pancreas": [20.0, 40.0]}
 
 
+def _cumleler(text: str) -> list[str]:
+    t = re.sub(r"\b(e\.g|i\.e|etc|vs|approx)\.", lambda m: m.group(1).replace(".", ""),
+               text or "", flags=re.I)
+    out = []
+    for s in C.sentences(t):
+        out += [x.strip() for x in s.split(";") if x.strip()]
+    return out
+
+
 def _olumsuz(s: str) -> bool:
     return bool(re.search(NEG_RE, s, re.I))
+
+
+def _oneri(s: str) -> bool:
+    return bool(re.search(ONERI_RE, s, re.I))
 
 
 def izinli_degerler(mf: dict[str, Any]) -> dict[str, list[float]]:
@@ -90,6 +114,7 @@ def izinli_degerler(mf: dict[str, Any]) -> dict[str, list[float]]:
         if v.get("encasement_angle_deg") is not None:
             d["angle"].append(float(v["encasement_angle_deg"]))
     d["length"] += ESIK_MM.get(mf.get("organ"), [])
+    d["length"].append(0.0); d["angle"].append(0.0)   # "> 0 mm", "0 degrees" karşılaştırma
     cat = mf.get("size_category") or ""
     for n in re.findall(r"\d+(?:\.\d+)?", cat):
         d["length"].append(float(n) * (10.0 if "cm" in cat else 1.0))
@@ -104,7 +129,7 @@ def _yakin(a: float, b: float) -> bool:
 def dayanaksiz_sayilar(text: str, mf: dict[str, Any]) -> list[str]:
     izin = izinli_degerler(mf)
     bulunan = []
-    for s in C.sentences(text):
+    for s in _cumleler(text):
         for m in evaluation.extract_measurements(s):
             if m.category not in izin:
                 continue
@@ -114,8 +139,8 @@ def dayanaksiz_sayilar(text: str, mf: dict[str, Any]) -> list[str]:
 
 
 def _terim_cumleleri(text: str, pattern: str) -> list[str]:
-    return [s[:200] for s in C.sentences(text)
-            if re.search(pattern, s, re.I) and not _olumsuz(s)]
+    return [s[:200] for s in _cumleler(text)
+            if re.search(pattern, s, re.I) and not _olumsuz(s) and not _oneri(s)]
 
 
 def eksik_boyut_kategorisi(text: str, mf: dict[str, Any]) -> bool:
@@ -165,6 +190,34 @@ def denetle(text: str, mf: dict[str, Any], findings: dict[str, Any]) -> dict[str
     }
 
 
+def kor_ornek(tum, out: Path, k: int = 3, seed: int = 42) -> None:
+    """Elle doğrulama için KÖR örneklem: her (kategori, model) için en fazla k işaretli
+    cümle, sabit seed ile rastgele. Model adı ayrı anahtar dosyasında; değerlendirici
+    yalnız cümleyi ve kategoriyi görür, 'karar' sütununu doldurur (dogru / yanlis_alarm)."""
+    import random
+    rnd = random.Random(seed)
+    grup = collections.defaultdict(list)
+    for model, ad, kat, x in tum:
+        if model != "Template":
+            grup[(kat, model)].append((ad, x))
+    secim = []
+    for key in sorted(grup):
+        xs = grup[key]
+        secim += [(key[0], key[1], ad, x) for ad, x in rnd.sample(xs, min(k, len(xs)))]
+    rnd.shuffle(secim)
+    with open(out / "elle_dogrulama_kor.csv", "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "kategori", "cumle", "karar"])
+        for i, (kat, _m, _ad, x) in enumerate(secim, 1):
+            w.writerow([i, kat, x, ""])
+    with open(out / "elle_dogrulama_anahtar.csv", "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "model", "vaka"])
+        for i, (_k, m, ad, _x) in enumerate(secim, 1):
+            w.writerow([i, m, ad])
+    print(f"elle doğrulama örneklemi: {len(secim)} cümle -> elle_dogrulama_kor.csv (+ anahtar)")
+
+
 EK = ["ek_sayi", "ek_tani", "ek_konum_morfoloji", "ek_faz", "ek_rezektabilite"]
 EKSIK = ["eksik_sayisal", "eksik_boyut_kategorisi", "eksik_lezyon_sayisi", "eksik_organ_adi"]
 
@@ -173,7 +226,7 @@ def main() -> int:
     exp = Path(config.LAYOUT.reports)
     out = config.LAYOUT.outputs / exp.name
     out.mkdir(parents=True, exist_ok=True)
-    satirlar, ornekler = [], collections.defaultdict(list)
+    satirlar, ornekler, tum = [], collections.defaultdict(list), []
     for p in sorted(glob.glob(os.path.join(str(config.LAYOUT.findings), "*.json"))):
         if p.endswith(".meta.json"):
             continue
@@ -192,6 +245,7 @@ def main() -> int:
             for kat, xs in r.pop("_ornek").items():
                 for x in xs:
                     ornekler[kat].append((model, x))
+                    tum.append((model, ad, kat, x))
             satirlar.append({"vaka": ad, "organ": mf["organ"], "model": model, **r})
     if not satirlar:
         print("rapor bulunamadı:", exp)
@@ -216,6 +270,7 @@ def main() -> int:
         w = csv.DictWriter(f, fieldnames=list(ozet[0].keys()))
         w.writeheader(); w.writerows(ozet)
 
+    kor_ornek(tum, out)
     print(f"rapor: {len(satirlar)} | çıktı: {out}\n")
     print("DAYANAKSIZ EKLEME (% rapor)")
     print(f"  {'model':16}{'herhangi':>9}{'sayı':>7}{'tanı':>7}{'konum/morf':>11}{'faz':>6}{'rezek.':>8}")

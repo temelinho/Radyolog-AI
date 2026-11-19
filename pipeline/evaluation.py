@@ -53,6 +53,8 @@ def _to_float(s: str) -> float:
 def extract_measurements(text: str) -> list[Measurement]:
     """Metinden (sayı + birim) ölçümleri çıkarır. Ondalıklar KORUNUR (F17)."""
     out: list[Measurement] = []
+    # HTML üst simge: "cm<sup>3</sup>" -> "cm^3" (Gemma bu biçimi kullandı)
+    text = re.sub(r"<\s*sup\s*>\s*(\d)\s*<\s*/\s*sup\s*>", r"^\1", text, flags=re.I)
     # Sayı + hemen ardından (ops.) birim
     pattern = re.compile(_NUM + r"\s*(cubic\s+centimet(?:er|re)s?|millilit(?:er|re)s?|"
                          r"millimet(?:er|re)s?|centimet(?:er|re)s?|"
