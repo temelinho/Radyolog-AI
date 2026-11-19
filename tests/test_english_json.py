@@ -115,3 +115,32 @@ class TestExperimentIsolation(unittest.TestCase):
         # ölçüm önbellek anahtarı PROMPT_VERSION'a bağlı; rapor istemi ayrı sürüm
         self.assertEqual(R.config.PROMPT_VERSION, "2.0.0")
         self.assertEqual(R.config.REPORT_PROMPT_VERSION, "3.0.0")
+
+
+class TestSingleAttemptInvalidOutput(unittest.TestCase):
+    """Geçersiz (kesik/boş) çıktı saklanır, özete 'gecersiz' yazılır, TEKRAR denenmez."""
+
+    def test_invalid_output_recorded_and_not_retried(self):
+        f = R.build_findings(organ="karaciger",
+                             summary={"lezyon_sayisi": 0, "toplam_tumor_hacim_cm3": 0.0},
+                             vessels={})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, output = root / "input", root / "output"
+            inputs.mkdir()
+            (inputs / "case.json").write_text(json.dumps(f), encoding="utf-8")
+            bad = R.LLMResponse("partial text", "local_hf", "m", finish_reason="length",
+                                truncated=True)
+            with patch.object(compare_llm, "FINDINGS_DIR", str(inputs)),                  patch.object(compare_llm, "OUTPUT_DIR", str(output)),                  patch.dict("os.environ", {"RADYOLOG_MODELS": "Llama"}),                  redirect_stdout(io.StringIO()):
+                with patch.object(R, "call_llm", return_value=bad) as call:
+                    compare_llm.main()
+                    self.assertEqual(call.call_count, 1)
+                self.assertTrue((output / "case__Llama.gecersiz.txt").exists())
+                rec = json.loads((output / "case__Llama.gecersiz.json").read_text(encoding="utf-8"))
+                self.assertEqual(rec["neden"], "kesik")
+                self.assertFalse((output / "case__Llama.txt").exists())
+                with patch.object(R, "call_llm", side_effect=AssertionError("retried")):
+                    compare_llm.main()          # ikinci koşu: tekrar çağırmamalı
+                import csv as _csv
+                rows = list(_csv.DictReader(open(output / "ozet.csv", encoding="utf-8-sig")))
+                self.assertEqual([r["yontem"] for r in rows], ["gecersiz-kesik"])

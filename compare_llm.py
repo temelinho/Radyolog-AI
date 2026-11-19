@@ -152,6 +152,22 @@ def main(dosyalar: list[str] | None = None) -> None:
                     raise RuntimeError(
                         f"Cached report has different or missing generation conditions: {out_txt}. "
                         "Set RADYOLOG_REPORTS_DIR to a new experiment directory.")
+            bad_txt = out_txt[:-4] + ".gecersiz.txt"
+            bad_rec = out_txt[:-4] + ".gecersiz.json"
+            if not cached and os.path.exists(bad_rec):
+                # TEK DENEME İLKESİ: geçersiz çıktı bir sonuçtur; "tutana kadar" yeniden
+                # denemek seçilim yanlılığı olur. Kayıt aynı koşula aitse atla.
+                with open(bad_rec, encoding="utf-8") as f:
+                    prev_bad = json.load(f)
+                if prev_bad.get("request_sha256") != identity["request_sha256"]:
+                    raise RuntimeError(f"Invalid-output record has different conditions: {bad_rec}. "
+                                       "Set RADYOLOG_REPORTS_DIR to a new experiment directory.")
+                print(f"  ⛔ {etiket}: geçersiz çıktı (kayıtlı: {prev_bad.get('neden')}), "
+                      "tekrar denenmez.")
+                ozet.append({"hasta": ad, "organ": findings.get("organ", ""), "model": etiket,
+                             "sadakat_gecen": "", "sadakat_toplam": "", "oran": "",
+                             "yontem": f"gecersiz-{prev_bad.get('neden')}"})
+                continue
             if cached:
                 with open(out_txt, "r", encoding="utf-8") as f:
                     text = f.read()
@@ -169,7 +185,22 @@ def main(dosyalar: list[str] | None = None) -> None:
                         traceback.print_exc()
                     continue
                 if not resp.is_valid():  # boş/kesik yanıt başarı sayılmaz (F19)
-                    print(f"  ⚠️  {etiket}: geçersiz/kesik yanıt, atlandı."); continue
+                    neden = ("refusal" if resp.finish_reason == "refusal"
+                             else "kesik" if resp.truncated else "bos")
+                    with open(bad_txt, "w", encoding="utf-8") as f:
+                        f.write(resp.text or "")
+                    with open(bad_rec, "w", encoding="utf-8") as f:
+                        json.dump({**identity, "neden": neden, "finish_reason": resp.finish_reason,
+                                   "usage": resp.usage,
+                                   "kosul": reporting.generation_conditions(cfg["provider"],
+                                                                            cfg["model"])},
+                                  f, ensure_ascii=False, indent=2)
+                    print(f"  ⛔ {etiket}: geçersiz çıktı ({neden}); metni ve kaydı saklandı, "
+                          "tekrar denenmeyecek.")
+                    ozet.append({"hasta": ad, "organ": findings.get("organ", ""), "model": etiket,
+                                 "sadakat_gecen": "", "sadakat_toplam": "", "oran": "",
+                                 "yontem": f"gecersiz-{neden}"})
+                    continue
                 text = resp.text
                 with open(out_txt, "w", encoding="utf-8") as f:
                     f.write(text)
