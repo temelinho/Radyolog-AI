@@ -48,6 +48,29 @@ def _load_findings(path: str) -> dict | None:
     return reporting.anonymize_findings(findings)
 
 
+def _kosullari_kaydet(models: dict) -> None:
+    """Her modele GERÇEKTE uygulanan üretim koşullarını OUTPUT_DIR/kosullar.json'a
+    yazar (model-model koşuda birikimli). Aynı-koşul iddiası bu kayıtla denetlenir."""
+    import hashlib
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    yol = os.path.join(OUTPUT_DIR, "kosullar.json")
+    kayit = {}
+    if os.path.exists(yol):
+        try:
+            with open(yol, "r", encoding="utf-8") as f:
+                kayit = json.load(f)
+        except Exception:
+            kayit = {}
+    kayit["system_prompt_sha256"] = hashlib.sha256(
+        reporting.SYSTEM_PROMPT.encode("utf-8")).hexdigest()
+    kayit["gen"] = reporting.GEN
+    kayit.setdefault("modeller", {})
+    for etiket, cfg in models.items():
+        kayit["modeller"][etiket] = reporting.generation_conditions(cfg["provider"], cfg["model"])
+    with open(yol, "w", encoding="utf-8") as f:
+        json.dump(kayit, f, ensure_ascii=False, indent=2)
+
+
 def main(dosyalar: list[str] | None = None) -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     # Model seçimi: RADYOLOG_MODELS=Gemini,Qwen,Gemma,Llama,Template (Claude hariç gibi).
@@ -67,6 +90,7 @@ def main(dosyalar: list[str] | None = None) -> None:
     if exclude:
         models = {k: v for k, v in models.items() if k not in exclude}
     print(f"🧪 Koşulacak modeller: {list(models)}")
+    _kosullari_kaydet(models)
     if dosyalar:
         paths = [d if os.path.isabs(d) else os.path.join(FINDINGS_DIR, d) for d in dosyalar]
     else:
@@ -129,6 +153,12 @@ def main(dosyalar: list[str] | None = None) -> None:
                 text = resp.text
                 with open(out_txt, "w", encoding="utf-8") as f:
                     f.write(text)
+                # Rapor başına üretim kaydı (bitiş nedeni, token, Claude'da düşünme bloğu var mı)
+                with open(out_txt[:-4] + ".uretim.json", "w", encoding="utf-8") as f:
+                    json.dump({"finish_reason": resp.finish_reason, "usage": resp.usage,
+                               "kosul": reporting.generation_conditions(cfg["provider"],
+                                                                        cfg["model"])},
+                              f, ensure_ascii=False, indent=2)
                 # Dakikalık limit (RPM) için API çağrıları arasına bekleme (saniye).
                 bekle = float(os.environ.get("RADYOLOG_LLM_DELAY", "0") or 0)
                 if bekle and cfg["provider"] in ("google", "anthropic"):

@@ -246,12 +246,63 @@ class LLMResponse:
         return bool(self.text and self.text.strip()) and not self.truncated
 
 
+# ---------------------------------------------------------------------------
+# ÜRETİM KOŞULLARI — TÜM MODELLER İÇİN TEK KAYNAK.
+# Claude Sonnet 5.5 örnekleme parametrelerini (temperature/top_p/top_k) kabul
+# etmez ve düşünmesi yalnız 'between_tools' ile kapatılabilir. Eşitlik bu yüzden
+# Claude'un SABİT koşuluna göre kurulur:
+#   * Girdi: herkese BİREBİR AYNI tek kullanıcı mesajı (sistem istemi + vaka).
+#   * Düşünme: hepsinde KAPALI (Claude: between_tools; açık modellerde yok).
+#   * Örnekleme: hepsinde KESİLMEMİŞ dağılım. Claude: API varsayılanı (parametre
+#     gönderilmez). Açık modeller: temperature 1.0, top_p 1.0, top_k kapalı,
+#     repetition_penalty 1.0 — modelin kendi generation_config varsayılanları EZİLİR.
+#   * Uzunluk sınırı: hepsinde aynı.
+# ---------------------------------------------------------------------------
+GEN = {
+    "max_tokens": 3500,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": 0,                 # 0 = top-k filtresi yok
+    "repetition_penalty": 1.0,
+    "seed": int(os.environ.get("RADYOLOG_SEED", "42")),
+}
+
+
+def build_input(system_prompt: str, user_prompt: str) -> str:
+    """Her modele giden TEK metin. Tüm sağlayıcılar bunu kullanır."""
+    return system_prompt.strip() + "\n\n" + user_prompt.strip()
+
+
+def generation_conditions(provider: str, model: str) -> dict[str, Any]:
+    """Bu sağlayıcıya GERÇEKTE uygulanan koşullar (kayıt/denetim için)."""
+    base = {"provider": provider, "model": model,
+            "input": "single user message = system prompt + case prompt",
+            "max_tokens": GEN["max_tokens"], "thinking": "off"}
+    if provider == "anthropic":
+        base.update({"sampling": "API default (temperature/top_p/top_k not settable)",
+                     "thinking_param": {"type": "between_tools"}, "seed": None})
+    elif provider == "local_hf":
+        base.update({"sampling": "unmodified distribution",
+                     "temperature": GEN["temperature"], "top_p": GEN["top_p"],
+                     "top_k": GEN["top_k"], "repetition_penalty": GEN["repetition_penalty"],
+                     "seed": GEN["seed"], "quantization": "4-bit NF4"})
+    elif provider == "google":
+        base.update({"sampling": "unmodified distribution",
+                     "temperature": GEN["temperature"], "top_p": GEN["top_p"]})
+    elif provider == "template":
+        base.update({"sampling": "deterministic (rule-based)", "thinking": "n/a"})
+    return base
+
+
 def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
-             findings: dict[str, Any] | None = None,
-             temperature: float = 0.3, max_tokens: int = 3500) -> LLMResponse:
+             findings: dict[str, Any] | None = None) -> LLMResponse:
+    """Tüm modeller GEN koşullarıyla çağrılır; koşul parametre olarak DEĞİŞTİRİLEMEZ."""
     if provider == "template":
         return LLMResponse(template_report(findings or {}), provider, model,
                            finish_reason="stop")
+
+    text_in = build_input(system_prompt, user_prompt)
+    max_tokens = GEN["max_tokens"]
 
     if provider == "anthropic":
         key = config.get_api_key("anthropic")
@@ -259,20 +310,18 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
             raise RuntimeError("ANTHROPIC_API_KEY yok (.env).")
         import anthropic
         client = anthropic.Anthropic(api_key=key)
-        # Claude Sonnet 5.5 örnekleme parametrelerini (temperature/top_p/top_k)
-        # KABUL ETMEZ (varsayılan dışı değer -> 400; güncel SDK parametreyi kaldırdı ->
-        # TypeError). Bu yüzden Claude SAĞLAYICI VARSAYILANLARIYLA koşar: varsayılan
-        # örnekleme + uyarlanabilir düşünme (adaptive thinking) açık, effort=high.
-        # Yöntemde böyle beyan edilir; sıcaklık diğer modellerle EŞİTLENEMEZ.
         msg = client.messages.create(
-            model=model, max_tokens=max_tokens, system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}])
+            model=model, max_tokens=max_tokens,
+            thinking={"type": "between_tools"},          # düşünme KAPALI
+            messages=[{"role": "user", "content": text_in}])
         if msg.stop_reason == "refusal":
             return LLMResponse("", provider, model, finish_reason="refusal")
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+        thought = any(getattr(b, "type", None) in ("thinking", "redacted_thinking")
+                      for b in msg.content)
         return LLMResponse(text, provider, model, finish_reason=msg.stop_reason,
                            usage={"in": msg.usage.input_tokens, "out": msg.usage.output_tokens,
-                                  "sampling": "provider-default"},
+                                  "thinking_blocks": thought},
                            truncated=(msg.stop_reason == "max_tokens"))
 
     if provider == "google":
@@ -283,31 +332,27 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
         import re as _re, time as _time
         client = genai.Client(api_key=key)
         gen_cfg = genai.types.GenerateContentConfig(
-            system_instruction=system_prompt, temperature=temperature,
-            max_output_tokens=max_tokens)               # F19: max_tokens aktarıldı
-        # Ücretsiz kota (5 istek/dk) ve geçici 503 için retry+backoff. Hata
-        # 'retryDelay'/'retry in Ns' taşır; onu okuyup bekleriz, yoksa üstel backoff.
+            temperature=GEN["temperature"], top_p=GEN["top_p"],
+            max_output_tokens=max_tokens)
+        # Ücretsiz kota (5 istek/dk) ve geçici 503 için retry+backoff.
         tries = int(os.environ.get("RADYOLOG_GEMINI_RETRIES", "6") or 6)
         resp = None
         for _att in range(tries):
             try:
                 resp = client.models.generate_content(
-                    model=model, contents=user_prompt, config=gen_cfg)
+                    model=model, contents=text_in, config=gen_cfg)
                 break
             except Exception as _e:
                 msg = str(_e)
                 transient = ("429" in msg or "RESOURCE_EXHAUSTED" in msg
                              or "503" in msg or "UNAVAILABLE" in msg)
-                # GÜNLÜK kota duvarı (PerDay, ücretsiz katman 20/gün): retryDelay
-                # saatler sürer; beklemek anlamsız -> hemen bırak (vaka .txt yazılmaz,
-                # ertesi gün devam-ettirmede denenir). Sadece DAKİKALIK/503 retrylenir.
                 daily = ("PerDay" in msg or "per day" in msg.lower())
                 m = _re.search(r"retry(?:Delay)?['\"]?\s*[:=]?\s*['\"]?\s*"
                                r"(?:in\s*)?([0-9]+(?:\.[0-9]+)?)\s*s", msg, _re.I)
                 wait = float(m.group(1)) if m else 0.0
                 if not transient or daily or wait > 120 or _att == tries - 1:
                     raise
-                wait = max(wait, 13.0 * (_att + 1))      # 5/dk için en az ~13s
+                wait = max(wait, 13.0 * (_att + 1))
                 _time.sleep(min(wait, 65.0))
         fr = None
         try:
@@ -320,17 +365,16 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
     if provider == "local_hf":
         import torch
         tok, mdl = _load_hf(model)
-        messages = [{"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}]
+        user_only = [{"role": "user", "content": text_in}]
         try:
-            enc = tok.apply_chat_template(
-                messages, add_generation_prompt=True, return_tensors="pt")
+            # Boş sistem mesajı: bazı şablonların (ör. Qwen) kendi varsayılan
+            # sistem metnini ("You are Qwen ...") EKLEMESİNİ engeller.
+            enc = tok.apply_chat_template([{"role": "system", "content": ""}] + user_only,
+                                          add_generation_prompt=True, return_tensors="pt")
         except Exception:
-            # Bazı şablonlar (ör. gemma-2) 'system' rolünü desteklemez: birleştir.
-            merged = system_prompt + "\n\n" + user_prompt
-            enc = tok.apply_chat_template(
-                [{"role": "user", "content": merged}],
-                add_generation_prompt=True, return_tensors="pt")
+            # Sistem rolünü desteklemeyen şablonlar (ör. gemma-2): yalnız kullanıcı.
+            enc = tok.apply_chat_template(user_only, add_generation_prompt=True,
+                                          return_tensors="pt")
         # Yeni transformers 'BatchEncoding' döndürür (tensor DEĞİL): input_ids'i ayıkla.
         if isinstance(enc, torch.Tensor):
             input_ids = enc.to(mdl.device)
@@ -341,15 +385,15 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
             if "attention_mask" in enc:
                 gen_kwargs["attention_mask"] = enc["attention_mask"].to(mdl.device)
         in_len = input_ids.shape[-1]
-        # Tekrarlanabilirlik: örnekleme (do_sample) her vakada aynı tohumla başlar.
-        seed = int(os.environ.get("RADYOLOG_SEED", "42"))
-        torch.manual_seed(seed)
+        torch.manual_seed(GEN["seed"])
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+            torch.cuda.manual_seed_all(GEN["seed"])
         with torch.no_grad():
             out = mdl.generate(**gen_kwargs, max_new_tokens=max_tokens,
-                               do_sample=temperature > 0,
-                               temperature=max(temperature, 1e-5),
+                               do_sample=True,
+                               temperature=GEN["temperature"], top_p=GEN["top_p"],
+                               top_k=GEN["top_k"],
+                               repetition_penalty=GEN["repetition_penalty"],
                                pad_token_id=tok.eos_token_id)
         gen = out[0][in_len:]
         text = tok.decode(gen, skip_special_tokens=True)
