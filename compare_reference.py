@@ -47,6 +47,10 @@ NEG_RE = (r"\bno\b[^.]{0,60}\b(lesions?|mass(?:es)?|tumou?rs?|nodules?|metasta\w
 DIA_RE = r"\b(diameter|measur\w+|largest|size|in size|dimension\w*)\b"
 DIST_RE = r"\b(distance|away|from the|separat\w+|contact|abut\w*|encase\w*)\b"
 # Damar cümleleri ("distance of the VCI to the tumor is 47 mm") lezyon beyanı DEĞİL.
+# Varsayımsal/koşullu cümleler beyan değildir ("If a lesion is later identified ...",
+# "does not exclude a subtle lesion", "lesions that may not have been segmented").
+HEDGE_RE = (r"\b(if|whether|unless|should|may|might|could|would|cannot|can't|"
+            r"does not exclude|do not exclude|not exclude|not replace|later)\b")
 VESSEL_RE = (r"\b(aort\w*|vein|venous|vena|vci|ivc|smv|sma|artery|arter\w*|celiac|"
              r"portal|mesenteric|vascular|vessels?)\b")
 # Rapor bir organ hakkında mı? Yanlış organ adı (ör. 'karaciger'i böbrek sanma) kontrolü.
@@ -205,6 +209,8 @@ def report_claims(text: str) -> tuple[bool, float | None]:
         lens = [m.value for m in evaluation.extract_measurements(s)
                 if m.category == "length"]
         has_dia = bool(re.search(DIA_RE, s, re.I))
+        if re.search(HEDGE_RE, s, re.I) and not (lens and has_dia):
+            continue
         # damar/mesafe cümlesi, lezyon boyutu söylemiyorsa beyan sayılmaz
         if (re.search(VESSEL_RE, s, re.I) or re.search(DIST_RE, s, re.I)) and not has_dia:
             continue
@@ -221,11 +227,15 @@ def report_claims(text: str) -> tuple[bool, float | None]:
 
 
 def organ_naming(text: str, organ: str | None) -> tuple[int, int]:
-    """(doğru organ adı geçiyor mu, başka bir organ adı geçiyor mu) — 0/1."""
+    """(doğru organ adı geçiyor mu, ORGAN KARIŞIKLIĞI var mı) — 0/1.
+
+    Karışıklık = doğru organ adı HİÇ geçmiyor ve başka bir organ adı geçiyor
+    (ör. 'karaciger' -> 'right kidney'). Doğru organı anlatıp komşu organdan
+    söz etmek ("no gastric invasion") karışıklık sayılmaz."""
     t = text or ""
     dogru = int(bool(organ) and bool(re.search(ORGAN_RE[organ], t, re.I)))
-    yanlis = int(bool(re.search(OTHER_ORGAN_RE, t, re.I)))
-    return dogru, yanlis
+    baska = bool(re.search(OTHER_ORGAN_RE, t, re.I))
+    return dogru, int(baska and not dogru)
 
 
 def rouge_l(cand: str, ref: str) -> float | None:
@@ -440,7 +450,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                             if (ref_org and organ) else ""),
                 "radyolog_organ_cumle": len(organ_sentences(rad_text.get(s, ""), organ))
                                         if organ else 0,
-                "organ_adi_dogru": org_ok, "baska_organ_adi": org_bad,
+                "organ_adi_dogru": org_ok, "organ_karisikligi": org_bad,
             })
     _write_csv(out / "rapor_kiyas_vaka.csv", rapor_satir)
 
@@ -464,14 +474,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "rouge_l_ort": round(sum(rouges) / len(rouges), 4) if rouges else "",
             "rouge_n": len(rouges),
             "organ_adi_dogru": f"{sum(x['organ_adi_dogru'] for x in rs)}/{len(rs)}",
-            "baska_organ_adi": f"{sum(x['baska_organ_adi'] for x in rs)}/{len(rs)}",
+            "organ_karisikligi": f"{sum(x['organ_karisikligi'] for x in rs)}/{len(rs)}",
         })
     _write_csv(out / "rapor_kiyas_ozet.csv", ozet)
     sonuc["rapor"] = ozet
     for o in ozet:
         print(f"  {o['model']:9} n={o['n']:3} · duy={o['duyarlilik']} özg={o['ozgulluk']} "
               f"doğ={o['dogruluk']} · çap MAE={o['cap_MAE_mm']} (n={o['cap_n']}, "
-              f"medyan={o['cap_medyan_AE']}) · ROUGE-L={o['rouge_l_ort']} (n={o['rouge_n']}) · organ adı doğru={o['organ_adi_dogru']} başka organ={o['baska_organ_adi']}")
+              f"medyan={o['cap_medyan_AE']}) · ROUGE-L={o['rouge_l_ort']} (n={o['rouge_n']}) · organ adı doğru={o['organ_adi_dogru']} organ karışıklığı={o['organ_karisikligi']}")
 
     with open(out / "referans_kiyas.json", "w", encoding="utf-8") as f:
         json.dump(sonuc, f, ensure_ascii=False, indent=2, default=str)

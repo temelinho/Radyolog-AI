@@ -20,6 +20,12 @@ NEGATIVE = [
     "FINDINGS: There are 0 hepatic lesions identified. Total tumor volume is 0.0 cm3.",
     "No masses or lesions are identified within the pancreas. - **Aorta:** Distance and "
     "encasement by any pancreatic mass are not assessed.",
+    # Claude: varsayımsal cümleler (0 lezyonlu raporlarda)
+    "Number of segmented lesions: 0. A negative segmentation result does not exclude a small, "
+    "isoattenuating, or otherwise subtle lesion. If a lesion is later identified, "
+    "histopathological confirmation is recommended.",
+    "Liver: The segmentation identified no focal lesions. The segmentation output does not "
+    "replace review of the images for lesions that may not have been segmented.",
 ]
 
 POSITIVE = [
@@ -53,6 +59,10 @@ class TestOrganNaming(unittest.TestCase):
 
     def test_correct_organ(self):
         self.assertEqual(C.organ_naming("No focal hepatic lesion.", "liver"), (1, 0))
+
+    def test_neighbor_organ_is_not_confusion(self):
+        t = "No focal pancreatic lesion. No invasion of the stomach or colon."
+        self.assertEqual(C.organ_naming(t, "pancreas"), (1, 0))
 
 
 class TestSentences(unittest.TestCase):
