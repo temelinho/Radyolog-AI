@@ -205,7 +205,10 @@ def template_report(findings: dict[str, Any]) -> str:
 # Sağlayıcı adaptörleri (F19)
 # ---------------------------------------------------------------------------
 MODELS = {
-    "Claude":   {"provider": "anthropic", "model": "claude-sonnet-5-5"},  # Sonnet (bütçe); diğerleriyle aynı koşul
+    "Claude":   {"provider": "anthropic", "model": "claude-sonnet-5-5"},  # ANA kıyas: düşünme kapalı
+    # EK KOL: aynı model, sağlayıcı varsayılanı (uyarlanabilir düşünme açık). Ana
+    # karşılaştırmaya girmez; "düşünme ne değiştirdi?" sorusu için ayrı raporlanır.
+    "Claude-thinking": {"provider": "anthropic_thinking", "model": "claude-sonnet-5-5"},
     "Gemini":   {"provider": "google", "model": "gemini-3.8-flash"},  # 2.5-flash yeni kullanicilara kapandi
     "Qwen":     {"provider": "local_hf", "model": "Qwen2.5-14B-Instruct"},
     "Gemma":    {"provider": "local_hf", "model": "gemma-2-9b-it"},
@@ -283,6 +286,10 @@ class LLMResponse:
 #     repetition_penalty 1.0 — modelin kendi generation_config varsayılanları EZİLİR.
 #   * Uzunluk sınırı: hepsinde aynı.
 # ---------------------------------------------------------------------------
+# Düşünme açık ek kolda düşünme tokenleri de max_tokens'tan düşer; görünür rapor
+# kesilmesin diye bu kola daha geniş bir sınır verilir (kayıtta açıkça yazılır).
+THINKING_MAX_TOKENS = 16000
+
 GEN = {
     "max_tokens": 3500,
     "temperature": 1.0,
@@ -310,6 +317,14 @@ def generation_conditions(provider: str, model: str) -> dict[str, Any]:
         base.update({"sampling": "API default (temperature/top_p/top_k not settable)",
                      "thinking_param": {"type": "between_tools"}, "seed": None,
                      "precision": "not disclosed by provider"})
+    elif provider == "anthropic_thinking":
+        base.update({"sampling": "API default (temperature/top_p/top_k not settable)",
+                     "thinking": "adaptive (provider default)",
+                     "thinking_param": {"type": "adaptive"}, "effort": "API default (high)",
+                     "max_tokens": THINKING_MAX_TOKENS,
+                     "max_tokens_note": "includes thinking tokens; additional arm, "
+                                        "not part of the equal-condition comparison",
+                     "seed": None, "precision": "not disclosed by provider"})
     elif provider == "local_hf":
         base.update({"sampling": "unmodified distribution",
                      "temperature": GEN["temperature"], "top_p": GEN["top_p"],
@@ -334,15 +349,18 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
     text_in = build_input(system_prompt, user_prompt)
     max_tokens = GEN["max_tokens"]
 
-    if provider == "anthropic":
+    if provider in ("anthropic", "anthropic_thinking"):
         key = config.get_api_key("anthropic")
         if not key:
             raise RuntimeError("ANTHROPIC_API_KEY yok (.env).")
         import anthropic
         client = anthropic.Anthropic(api_key=key)
+        if provider == "anthropic":
+            thinking, mt = {"type": "between_tools"}, max_tokens      # ana kol: düşünme KAPALI
+        else:
+            thinking, mt = {"type": "adaptive"}, THINKING_MAX_TOKENS  # ek kol: varsayılan, AÇIK
         msg = client.messages.create(
-            model=model, max_tokens=max_tokens,
-            thinking={"type": "between_tools"},          # düşünme KAPALI
+            model=model, max_tokens=mt, thinking=thinking,
             messages=[{"role": "user", "content": text_in}])
         if msg.stop_reason == "refusal":
             return LLMResponse("", provider, model, finish_reason="refusal")

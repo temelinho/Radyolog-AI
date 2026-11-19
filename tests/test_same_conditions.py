@@ -157,6 +157,21 @@ class TestSameConditions(unittest.TestCase):
             self.assertEqual(v["max_tokens"], REP.GEN["max_tokens"])
             self.assertEqual(v["input"], "single user message = system prompt + case prompt")
 
+    def test_claude_thinking_arm_is_separate(self):
+        REP.call_llm("anthropic_thinking", "claude-sonnet-5-5", REP.SYSTEM_PROMPT, PROMPT,
+                     findings=FINDINGS)
+        req = _FakeAnthropic.sink[-1]
+        self.assertEqual(req["messages"], [{"role": "user", "content": EXPECTED_INPUT}])
+        self.assertEqual(req["thinking"], {"type": "adaptive"})
+        self.assertEqual(req["max_tokens"], REP.THINKING_MAX_TOKENS)
+        for p in ("temperature", "top_p", "top_k", "system"):
+            self.assertNotIn(p, req)
+        a = REP.request_identity("anthropic", "claude-sonnet-5-5", REP.SYSTEM_PROMPT, PROMPT)
+        b = REP.request_identity("anthropic_thinking", "claude-sonnet-5-5", REP.SYSTEM_PROMPT, PROMPT)
+        self.assertNotEqual(a["request_sha256"], b["request_sha256"])   # önbellekler karışmaz
+        self.assertEqual(a["input_sha256"], b["input_sha256"])          # girdi aynı
+        self.assertIn("Claude-thinking", REP.MODELS)
+
 
 if __name__ == "__main__":
     unittest.main()
