@@ -37,11 +37,20 @@ ORGAN_RE = {
     "pancreas": r"\bpancrea\w*\b",
 }
 LESION_RE = r"\b(lesions?|mass(?:es)?|tumou?rs?|nodules?|metasta\w+|neoplasm\w*|carcinoma\w*)\b"
-NEG_RE = (r"\bno\b[^.]{0,60}\b(lesions?|mass(?:es)?|tumou?rs?|nodules?|metasta\w+)\b"
+NEG_RE = (r"\bno\b[^.]{0,60}\b(lesions?|mass(?:es)?|tumou?rs?|nodules?|metasta\w+|neoplas\w+)\b"
           r"|\bwithout\b[^.]{0,40}\b(lesions?|mass(?:es)?|tumou?rs?)\b"
-          r"|\b(not|none)\b[^.]{0,30}\b(identified|detected|seen|present)\b")
+          r"|\b(not|none)\b[^.]{0,30}\b(identified|detected|seen|present)\b"
+          # sıfır sayısı: "0 hepatic lesions", "number of lesions: 0", "zero lesions"
+          r"|\b(0|zero)\s+(?:\w+\s+){0,2}(lesions?|mass(?:es)?|tumou?rs?|nodules?)\b"
+          r"|\b(lesions?|nodules?|tumou?rs?)\b[^.\d]{0,25}:\s*0\b"
+          r"|\babsen(ce|t)\b[^.]{0,40}\b(lesions?|mass(?:es)?|tumou?rs?)\b")
 DIA_RE = r"\b(diameter|measur\w+|largest|size|in size|dimension\w*)\b"
 DIST_RE = r"\b(distance|away|from the|separat\w+|contact|abut\w*|encase\w*)\b"
+# Damar cümleleri ("distance of the VCI to the tumor is 47 mm") lezyon beyanı DEĞİL.
+VESSEL_RE = (r"\b(aort\w*|vein|venous|vena|vci|ivc|smv|sma|artery|arter\w*|celiac|"
+             r"portal|mesenteric|vascular|vessels?)\b")
+# Rapor bir organ hakkında mı? Yanlış organ adı (ör. 'karaciger'i böbrek sanma) kontrolü.
+OTHER_ORGAN_RE = r"\b(kidneys?|renal|spleen|splenic|lungs?|pulmonary|stomach|gastric|colon\w*|bladder)\b"
 
 
 def organ_key(s: str) -> str | None:
@@ -195,9 +204,13 @@ def report_claims(text: str) -> tuple[bool, float | None]:
         negated = bool(re.search(NEG_RE, s, re.I))
         lens = [m.value for m in evaluation.extract_measurements(s)
                 if m.category == "length"]
+        has_dia = bool(re.search(DIA_RE, s, re.I))
+        # damar/mesafe cümlesi, lezyon boyutu söylemiyorsa beyan sayılmaz
+        if (re.search(VESSEL_RE, s, re.I) or re.search(DIST_RE, s, re.I)) and not has_dia:
+            continue
         if lens and not negated:
             positive = True
-            if re.search(DIA_RE, s, re.I) and not re.search(DIST_RE, s, re.I):
+            if has_dia:  # boyut cümlesi (mesafe cümleleri yukarıda elendi)
                 best = max(lens) if best is None else max(best, max(lens))
         elif not negated and not lens:
             # ölçüsüz ama olumlu lezyon cümlesi ("a hepatic mass is present")
@@ -205,6 +218,14 @@ def report_claims(text: str) -> tuple[bool, float | None]:
                          s, re.I):
                 positive = True
     return positive, best
+
+
+def organ_naming(text: str, organ: str | None) -> tuple[int, int]:
+    """(doğru organ adı geçiyor mu, başka bir organ adı geçiyor mu) — 0/1."""
+    t = text or ""
+    dogru = int(bool(organ) and bool(re.search(ORGAN_RE[organ], t, re.I)))
+    yanlis = int(bool(re.search(OTHER_ORGAN_RE, t, re.I)))
+    return dogru, yanlis
 
 
 def rouge_l(cand: str, ref: str) -> float | None:
@@ -407,6 +428,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             with open(p, "r", encoding="utf-8") as f:
                 text = f.read()
             pos, mm = report_claims(text)
+            org_ok, org_bad = organ_naming(text, organ)
             rapor_satir.append({
                 "study_id": s, "organ": organ, "model": model,
                 "gt_pozitif": int(gt_pos), "rapor_pozitif": int(pos),
@@ -418,6 +440,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                             if (ref_org and organ) else ""),
                 "radyolog_organ_cumle": len(organ_sentences(rad_text.get(s, ""), organ))
                                         if organ else 0,
+                "organ_adi_dogru": org_ok, "baska_organ_adi": org_bad,
             })
     _write_csv(out / "rapor_kiyas_vaka.csv", rapor_satir)
 
@@ -440,13 +463,15 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "cap_medyan_AE": (sorted(farklar)[len(farklar) // 2] if farklar else ""),
             "rouge_l_ort": round(sum(rouges) / len(rouges), 4) if rouges else "",
             "rouge_n": len(rouges),
+            "organ_adi_dogru": f"{sum(x['organ_adi_dogru'] for x in rs)}/{len(rs)}",
+            "baska_organ_adi": f"{sum(x['baska_organ_adi'] for x in rs)}/{len(rs)}",
         })
     _write_csv(out / "rapor_kiyas_ozet.csv", ozet)
     sonuc["rapor"] = ozet
     for o in ozet:
         print(f"  {o['model']:9} n={o['n']:3} · duy={o['duyarlilik']} özg={o['ozgulluk']} "
               f"doğ={o['dogruluk']} · çap MAE={o['cap_MAE_mm']} (n={o['cap_n']}, "
-              f"medyan={o['cap_medyan_AE']}) · ROUGE-L={o['rouge_l_ort']} (n={o['rouge_n']})")
+              f"medyan={o['cap_medyan_AE']}) · ROUGE-L={o['rouge_l_ort']} (n={o['rouge_n']}) · organ adı doğru={o['organ_adi_dogru']} başka organ={o['baska_organ_adi']}")
 
     with open(out / "referans_kiyas.json", "w", encoding="utf-8") as f:
         json.dump(sonuc, f, ensure_ascii=False, indent=2, default=str)
