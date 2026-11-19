@@ -38,6 +38,12 @@ VESSEL_EN = {"aorta": "aorta",
              "vci": "inferior vena cava (IVC)"}
 
 
+# Sadakat bağlam sözcükleri için damar kökleri/sıfatları ("aortic", "caval", "IVC").
+VESSEL_KW = {"aorta": ["aort"],
+             "portal_ven": ["portal", "splenic"],
+             "vci": ["vena cava", "ivc", "caval", "cava"]}
+
+
 def organ_en(name: str | None) -> str:
     return ORGAN_EN.get((name or "").strip().lower(), name or "unknown")
 

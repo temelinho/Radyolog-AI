@@ -26,9 +26,12 @@ from . import config
 # Birim normalizasyonu: kategori + mm'ye/cm3'e/dereceye çevrim.
 _UNIT_PATTERNS = [
     # (regex, kategori, çarpan -> kanonik birim)
-    (r"cm\s*(?:\^?3|³)|cc\b|ml\b", "volume", 1.0),   # hacim: cm3 ~ ml ~ cc
-    (r"mm\b", "length", 1.0),                         # mm
-    (r"cm\b", "length", 10.0),                        # cm -> mm
+    # Açık yazımlar da (ör. "millimeters", "cubic centimeters") tanınır: Gemma/Llama
+    # birimleri açık yazıyordu ve kısaltma-only kural onları haksız yere eksik sayıyordu.
+    (r"cm\s*(?:\^?3|³)|cc\b|ml\b|cubic\s+centimet(?:er|re)s?|millilit(?:er|re)s?",
+     "volume", 1.0),                                  # hacim: cm3 ~ ml ~ cc
+    (r"mm\b|millimet(?:er|re)s?", "length", 1.0),    # mm
+    (r"cm\b|centimet(?:er|re)s?", "length", 10.0),   # cm -> mm
     (r"°|derece|degrees?\b|deg\b", "angle", 1.0),     # açı
 ]
 
@@ -51,7 +54,9 @@ def extract_measurements(text: str) -> list[Measurement]:
     """Metinden (sayı + birim) ölçümleri çıkarır. Ondalıklar KORUNUR (F17)."""
     out: list[Measurement] = []
     # Sayı + hemen ardından (ops.) birim
-    pattern = re.compile(_NUM + r"\s*(cm\s*\^?3|cm³|cc|ml|mm|cm|°|derece|degrees?|deg)?",
+    pattern = re.compile(_NUM + r"\s*(cubic\s+centimet(?:er|re)s?|millilit(?:er|re)s?|"
+                         r"millimet(?:er|re)s?|centimet(?:er|re)s?|"
+                         r"cm\s*\^?3|cm³|cc|ml|mm|cm|°|derece|degrees?|deg)?",
                          re.IGNORECASE)
     for m in pattern.finditer(text):
         num = m.group(0)
@@ -109,7 +114,8 @@ def findings_to_facts(findings: dict[str, Any]) -> list[Fact]:
             continue
         kw = [vname.replace("_", " "), *vname.split("_"),
               config.vessel_en(vname), *config.vessel_en(vname).replace("(", " ")
-              .replace(")", " ").split()]
+              .replace(")", " ").split(),
+              *config.VESSEL_KW.get(vname, [])]   # sıfat/kök: "aortic", "caval" ...
         if vinfo.get("mesafe_mm") is not None:
             facts.append(Fact(f"{vname}_mesafe", "length", float(vinfo["mesafe_mm"]),
                               kw + ["mesafe", "distance", "temas", "contact", "abut"]))
@@ -132,10 +138,19 @@ def fact_supported(fact: Fact, sentences: list[str]) -> bool:
         if not any(k in sl for k in kws):
             continue
         for meas in extract_measurements(s):
-            if meas.category != fact.category:
-                continue
-            if _close(meas.value, fact.value):
+            if meas.category == fact.category and _close(meas.value, fact.value):
                 return True
+            # Açı: birimsiz yazılmış değer ("encasement angle of 0") açı/sarma cümlesindeyse
+            if (fact.category == "angle" and meas.category == "dimensionless"
+                    and ("angle" in sl or "encase" in sl) and _close(meas.value, fact.value)):
+                return True
+        # Açı = 0: "no encasement", "without encasement", "not encased" anlamca aynıdır
+        if fact.category == "angle" and fact.value == 0 and re.search(
+                r"\b(no|without|absence of|absent)\b[^.]{0,40}encase"
+                r"|\bnot\s+encased\b"
+                r"|encasement[^.]{0,20}\b(absent|not\s+(?:present|seen|identified|noted|observed))\b",
+                sl):
+            return True
     return False
 
 

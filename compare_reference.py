@@ -54,7 +54,10 @@ HEDGE_RE = (r"\b(if|whether|unless|should|may|might|could|would|cannot|can't|"
 VESSEL_RE = (r"\b(aort\w*|vein|venous|vena|vci|ivc|smv|sma|artery|arter\w*|celiac|"
              r"portal|mesenteric|vascular|vessels?)\b")
 # Rapor bir organ hakkında mı? Yanlış organ adı (ör. 'karaciger'i böbrek sanma) kontrolü.
-OTHER_ORGAN_RE = r"\b(kidneys?|renal|spleen|splenic|lungs?|pulmonary|stomach|gastric|colon\w*|bladder)\b"
+# Damar adları organ sayılmaz: "splenic vein", "renal vein" JSON'daki damar adından gelir.
+OTHER_ORGAN_RE = (r"\b(kidneys?|renal(?!\s+(?:vein|arter))|spleen|splenic(?!\s+(?:vein|arter|flexure))"
+                  r"|lungs?|pulmonary(?!\s+(?:vein|arter))|stomach|gastric(?!\s+(?:vein|arter))"
+                  r"|colon\w*|bladder)\b")
 
 
 def organ_key(s: str) -> str | None:
