@@ -93,6 +93,9 @@ def build_prompt(findings: dict[str, Any]) -> str:
     f = anonymize_findings(findings)   # güvenlik: yalnız izinli (klinik) alanlar
     L = ["CT segmentation findings — use ONLY these values, invent nothing:"]
     L.append(f"- Organ: {config.organ_en(f.get('organ'))}")
+    faz = (f.get("goruntuleme") or "").strip()
+    L.append("- Imaging phase / contrast: "
+             + ("not specified" if faz.lower() in ("", "bilinmiyor", "unknown") else faz))
     n = f.get("lezyon_sayisi")
     L.append(f"- Number of lesions: {'not assessed' if n is None else n}")
     tv = f.get("toplam_tumor_hacim_cm3")
@@ -256,17 +259,20 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
             raise RuntimeError("ANTHROPIC_API_KEY yok (.env).")
         import anthropic
         client = anthropic.Anthropic(api_key=key)
-        # TÜM modeller AYNI koşul: temperature gönderilir. Bazı SDK/model sürümleri
-        # temperature kabul etmezse (TypeError) onsuz tekrar denenir ki Claude çökmesin.
-        base = dict(model=model, max_tokens=max_tokens, system=system_prompt,
-                    messages=[{"role": "user", "content": user_prompt}])
-        try:
-            msg = client.messages.create(temperature=temperature, **base)
-        except TypeError:
-            msg = client.messages.create(**base)
+        # Claude Sonnet 5.5 örnekleme parametrelerini (temperature/top_p/top_k)
+        # KABUL ETMEZ (varsayılan dışı değer -> 400; güncel SDK parametreyi kaldırdı ->
+        # TypeError). Bu yüzden Claude SAĞLAYICI VARSAYILANLARIYLA koşar: varsayılan
+        # örnekleme + uyarlanabilir düşünme (adaptive thinking) açık, effort=high.
+        # Yöntemde böyle beyan edilir; sıcaklık diğer modellerle EŞİTLENEMEZ.
+        msg = client.messages.create(
+            model=model, max_tokens=max_tokens, system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}])
+        if msg.stop_reason == "refusal":
+            return LLMResponse("", provider, model, finish_reason="refusal")
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
         return LLMResponse(text, provider, model, finish_reason=msg.stop_reason,
-                           usage={"in": msg.usage.input_tokens, "out": msg.usage.output_tokens},
+                           usage={"in": msg.usage.input_tokens, "out": msg.usage.output_tokens,
+                                  "sampling": "provider-default"},
                            truncated=(msg.stop_reason == "max_tokens"))
 
     if provider == "google":
@@ -335,6 +341,11 @@ def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str,
             if "attention_mask" in enc:
                 gen_kwargs["attention_mask"] = enc["attention_mask"].to(mdl.device)
         in_len = input_ids.shape[-1]
+        # Tekrarlanabilirlik: örnekleme (do_sample) her vakada aynı tohumla başlar.
+        seed = int(os.environ.get("RADYOLOG_SEED", "42"))
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
         with torch.no_grad():
             out = mdl.generate(**gen_kwargs, max_new_tokens=max_tokens,
                                do_sample=temperature > 0,
