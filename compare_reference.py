@@ -132,6 +132,36 @@ def pipeline_diameter_by_volume(fnd: dict[str, Any]) -> float:
     return float(v) if v is not None else 0.0
 
 
+# Segmentasyon QC bayrağı: RADYOLOĞA BAKMADAN, yalnız maskenin kendi özelliğinden.
+# Parçalanma (çok sayıda bileşen) aşırı-segmentasyonun işaretidir. Eşik veri
+# görüldükten sonra seçildiği için analiz KEŞİFSELDİR (makalede böyle beyan edilir).
+QC_MAX_LESIONS = int(os.environ.get("RADYOLOG_QC_MAX_LESIONS", "10"))
+
+
+def qc_pass(fnd: dict[str, Any]) -> bool:
+    return int(fnd.get("lezyon_sayisi") or 0) <= QC_MAX_LESIONS
+
+
+def error_distribution(pairs: list[tuple[float, float]]) -> dict[str, Any]:
+    """Betimleyici hata dağılımı (alt küme SEÇMEZ; tüm çiftler üzerinde)."""
+    if not pairs:
+        return {}
+    ae = sorted(abs(p - r) for p, r in pairs)
+    n = len(ae)
+    med = ae[n // 2] if n % 2 else (ae[n // 2 - 1] + ae[n // 2]) / 2
+    out = {"medyan_AE": round(med, 2)}
+    for t in (5, 10, 20):
+        out[f"<={t}mm"] = f"{sum(1 for x in ae if x <= t)}/{n}"
+    return out
+
+
+def _loa(pairs):
+    d = [p - r for p, r in pairs]
+    mu = sum(d) / len(d)
+    sd = (sum((x - mu) ** 2 for x in d) / max(len(d) - 1, 1)) ** 0.5
+    return [round(mu - 1.96 * sd, 2), round(mu + 1.96 * sd, 2)]
+
+
 # ---------------------------------------------------------------------------
 # Rapor metni yardımcıları
 # ---------------------------------------------------------------------------
@@ -145,6 +175,14 @@ def sentences(text: str) -> list[str]:
 
 def organ_sentences(text: str, organ: str) -> list[str]:
     pat = re.compile(ORGAN_RE[organ], re.I)
+    return [s for s in sentences(text) if pat.search(s)]
+
+
+def candidate_sentences(text: str, organ: str) -> list[str]:
+    """Model raporundan kıyaslanacak cümleler: organ ya da lezyon cümleleri.
+    (Şablon/istem organ adını Türkçe 'karaciger/pankreas' verdiği için onlar da
+    yakalanır.) Böylece ROUGE organ-cümlesi vs organ-cümlesi olur, simetrik."""
+    pat = re.compile(ORGAN_RE[organ] + r"|karaci|pankrea|" + LESION_RE, re.I)
     return [s for s in sentences(text) if pat.search(s)]
 
 
@@ -253,7 +291,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                   f"· PPV={f2(ppv)} NPV={f2(npv)}")
 
     # ---------------- 2) ÇAP UYUMU ----------------
-    print("\n=== 2) ÇAP UYUMU (POS vakalar, hedef = en büyük çap politikası) ===")
+    print("\n=== 2) ÇAP UYUMU (POS vakalar) ===")
+    print("  eşleştirme politikası: pipeline'ın EN BÜYÜK ÇAPLI lezyonu vs radyoloğun "
+          "ölçtüğü lezyon (koordinat yok -> garantili aynı-lezyon eşleşmesi DEĞİL)")
+    ciftler_qc = {"gecti": [], "kaldi": []}
     satirlar = []
     ciftler = {"hepsi": [], "liver": [], "pancreas": []}
     ciftler_vol = {"hepsi": [], "liver": [], "pancreas": []}   # alternatif: hacim politikası
@@ -272,6 +313,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             durum = "eslesti"
             ciftler["hepsi"].append((pipe, ref_mm))
             ciftler[cases[s]["organ"]].append((pipe, ref_mm))
+            ciftler_qc["gecti" if qc_pass(cases[s]["findings"]) else "kaldi"].append(
+                (pipe, ref_mm))
         # hacim politikası: aynı "pozitif" vakalarda (lezyon bulunan) kıyasla
         if durum == "eslesti" and pipe_vol > 0:
             ciftler_vol["hepsi"].append((pipe_vol, ref_mm))
@@ -283,43 +326,45 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                          "fark_mm": round(pipe - ref_mm, 2) if durum == "eslesti" else "",
                          "fark_vol_mm": (round(pipe_vol - ref_mm, 2)
                                          if (durum == "eslesti" and pipe_vol > 0) else ""),
-                         "lezyon_sayisi": cases[s]["findings"].get("lezyon_sayisi", 0)})
+                         "lezyon_sayisi": cases[s]["findings"].get("lezyon_sayisi", 0),
+                         "qc": "gecti" if qc_pass(cases[s]["findings"]) else "kaldi"})
     _write_csv(out / "cap_uyumu_vaka.csv", satirlar)
     for grup, pairs in ciftler.items():
         kacan = sum(1 for x in satirlar if x["durum"] == "kacirildi"
                     and (grup == "hepsi" or x["organ"] == grup))
         m = evaluation.measurement_agreement(pairs, n_skipped=kacan)
-        # ek: |fark| <= 10 mm olan alt küme (segmentasyonun "tuttuğu" vakalar)
-        yakin = [(p, r) for p, r in pairs if abs(p - r) <= 10.0]
-        m["yakin_10mm"] = evaluation.measurement_agreement(yakin)
         if pairs:
-            d = [p - r for p, r in pairs]
-            mu = sum(d) / len(d)
-            sd = (sum((x - mu) ** 2 for x in d) / max(len(d) - 1, 1)) ** 0.5
-            m["LoA"] = [round(mu - 1.96 * sd, 2), round(mu + 1.96 * sd, 2)]
+            m["LoA"] = _loa(pairs)
+        m["hata_dagilimi"] = error_distribution(pairs)
         sonuc["cap_uyumu"][grup] = m
         print(f"  [{grup:8}] n={m['n_eslesen']} kaçan={m['n_atlanan']} · MAE={m['MAE']} "
-              f"· yanlılık={m['yanlilik']} · r={m['korelasyon']} · LoA={m.get('LoA')}"
-              f" · |fark|<=10mm: n={m['yakin_10mm']['n_eslesen']} "
-              f"MAE={m['yakin_10mm']['MAE']} r={m['yakin_10mm']['korelasyon']}")
+              f"· yanlılık={m['yanlilik']} · r={m['korelasyon']} · LoA={m.get('LoA')} "
+              f"· {m['hata_dagilimi']}")
+
+    print(f"\n  --- QC katmanı (keşifsel; radyoloğa bakmadan: lezyon_sayisi <= "
+          f"{QC_MAX_LESIONS} ise 'geçti') ---")
+    sonuc["cap_uyumu_qc"] = {}
+    for k, pairs in ciftler_qc.items():
+        mq = evaluation.measurement_agreement(pairs)
+        if pairs:
+            mq["LoA"] = _loa(pairs)
+        mq["hata_dagilimi"] = error_distribution(pairs)
+        sonuc["cap_uyumu_qc"][k] = mq
+        print(f"  [QC {k:5}] n={mq['n_eslesen']} · MAE={mq['MAE']} · yanlılık={mq['yanlilik']} "
+              f"· r={mq['korelasyon']} · {mq['hata_dagilimi']}")
 
     # --- Alternatif politika: hedef = en büyük HACİMLİ lezyon (artefakt elenir) ---
     print("\n  --- alternatif hedef: en büyük HACİMLİ lezyon ---")
     sonuc["cap_uyumu_hacim"] = {}
     for grup, pairs in ciftler_vol.items():
         mv = evaluation.measurement_agreement(pairs)
-        yakin = [(p, r) for p, r in pairs if abs(p - r) <= 10.0]
-        mv["yakin_10mm"] = evaluation.measurement_agreement(yakin)
         if pairs:
-            d = [p - r for p, r in pairs]
-            mu = sum(d) / len(d)
-            sd = (sum((x - mu) ** 2 for x in d) / max(len(d) - 1, 1)) ** 0.5
-            mv["LoA"] = [round(mu - 1.96 * sd, 2), round(mu + 1.96 * sd, 2)]
+            mv["LoA"] = _loa(pairs)
+        mv["hata_dagilimi"] = error_distribution(pairs)
         sonuc["cap_uyumu_hacim"][grup] = mv
         print(f"  [{grup:8}] n={mv['n_eslesen']} · MAE={mv['MAE']} "
-              f"· yanlılık={mv['yanlilik']} · r={mv['korelasyon']} · LoA={mv.get('LoA')}"
-              f" · |fark|<=10mm: n={mv['yakin_10mm']['n_eslesen']} "
-              f"MAE={mv['yakin_10mm']['MAE']} r={mv['yakin_10mm']['korelasyon']}")
+              f"· yanlılık={mv['yanlilik']} · r={mv['korelasyon']} · LoA={mv.get('LoA')} "
+              f"· {mv['hata_dagilimi']}")
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -369,7 +414,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 "rapor_mm": "" if mm is None else round(mm, 2),
                 "abs_fark_mm": (round(abs(mm - ref_mm), 2)
                                 if (mm is not None and ref_mm is not None) else ""),
-                "rouge_l": (rouge_l(text, ref_org) if ref_org else ""),
+                "rouge_l": (rouge_l(" . ".join(candidate_sentences(text, organ)), ref_org)
+                            if (ref_org and organ) else ""),
                 "radyolog_organ_cumle": len(organ_sentences(rad_text.get(s, ""), organ))
                                         if organ else 0,
             })
@@ -391,7 +437,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "dogruluk": round((tp + tn) / len(rs), 3) if rs else "",
             "cap_n": len(farklar),
             "cap_MAE_mm": round(sum(farklar) / len(farklar), 2) if farklar else "",
-            "cap_10mm_icinde": sum(1 for d in farklar if d <= 10.0),
+            "cap_medyan_AE": (sorted(farklar)[len(farklar) // 2] if farklar else ""),
             "rouge_l_ort": round(sum(rouges) / len(rouges), 4) if rouges else "",
             "rouge_n": len(rouges),
         })
@@ -400,7 +446,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     for o in ozet:
         print(f"  {o['model']:9} n={o['n']:3} · duy={o['duyarlilik']} özg={o['ozgulluk']} "
               f"doğ={o['dogruluk']} · çap MAE={o['cap_MAE_mm']} (n={o['cap_n']}, "
-              f"<=10mm: {o['cap_10mm_icinde']}) · ROUGE-L={o['rouge_l_ort']} (n={o['rouge_n']})")
+              f"medyan={o['cap_medyan_AE']}) · ROUGE-L={o['rouge_l_ort']} (n={o['rouge_n']})")
 
     with open(out / "referans_kiyas.json", "w", encoding="utf-8") as f:
         json.dump(sonuc, f, ensure_ascii=False, indent=2, default=str)
