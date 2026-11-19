@@ -46,15 +46,15 @@ Seçim kodu, girdi dosyasının özeti (SHA-256), terim sürümü ve tüm parame
 - **Sarma açısı.** Her aksiyel kesitte, damara 2 mm'den yakın tümör vokselleri damarın o kesitteki merkezine göre açısal olarak değerlendirilmiş, temas eden açı aralığı derece olarak hesaplanmıştır. Bu ölçüm araştırma amaçlıdır ve tek başına rezektabilite kararı için kullanılmamıştır.
 - **Boyut kategorisi.** En büyük çapa göre organa özgü kategori (pankreas ≤2 / 2–4 / >4 cm; karaciğer ≤2 / 2–5 / >5 cm). Bu bir T evresi değildir.
 
-**Ölçüm kodunun doğrulanması.** Ölçüm fonksiyonları, gerçek boyutu analitik olarak bilinen sentetik fantomlarla (küre, elipsoid, iki ayrı küre, anizotrop voksel aralığı) test edilmiştir. Toplam 112 otomatik birim testi bulunmaktadır.
+**Ölçüm kodunun doğrulanması.** Ölçüm fonksiyonları, gerçek boyutu analitik olarak bilinen sentetik fantomlarla (küre, elipsoid, iki ayrı küre, anizotrop voksel aralığı) test edilmiştir. Bu testler, yalnızca test edilen geometrilerde hesaplamanın doğru olduğunu gösterir; gerçek vakalardaki sapmaların tamamının segmentasyondan kaynaklandığını tek başına kanıtlamaz.
 
 ## 2.5 Temellendirilmiş rapor üretimi
 
-**Girdi.** Her vaka için modele yalnızca organ adı ve klinik sayısal metrikler (lezyon sayısı, toplam tümör hacmi, en büyük lezyonun çapı ve hacmi, damar mesafeleri ve sarma açıları, boyut kategorisi, görüntüleme fazı) etiketli bir metin bloğu olarak verilmiştir. İzinli alan listesi (allowlist) uygulanmış; veri seti adı, segmentasyon modelinin kimliği, çalışma kimliği ve dosya yolları modele gönderilmemiştir. Görüntü verilmemiştir.
+**Girdi.** Her vaka için ölçüm dosyasından, anahtarları ve değerleri İngilizce olan tek bir klinik JSON nesnesi oluşturulmuştur: `organ` (liver/pancreas), `imaging_phase`, `lesion_count`, `total_tumor_volume_cm3`, en büyük çaplı ve en büyük hacimli lezyon için `axial_diameter_mm` ve `volume_cm3`, damar başına `distance_mm`, `encasement_angle_deg` ve `status`, `size_category`. Ölçülmemiş değerler `null` olarak bırakılmıştır. İzinli alan listesi (allowlist) uygulanmış; veri seti adı, segmentasyon modelinin kimliği, çalışma kimliği ve dosya yolları modele gönderilmemiştir. Görüntü verilmemiştir. Tüm modellere aynı JSON ve aynı İngilizce talimat, tek bir kullanıcı mesajı olarak verilmiştir.
 
 **Sistem istemi.** Tüm modellere aynı sistem istemi verilmiştir. İstem, yalnızca verilen metriklere dayanmayı, verilmeyen sayı veya bulgu üretmemeyi, ölçülmemiş alanı ölçülmüş gibi sunmamayı, boyut kategorisini T evresi olarak sunmamayı, sarma açısından tek başına rezektabilite kararı çıkarmamayı ve histopatolojik doğrulama önermeyi şart koşar. Rapor İngilizce ve standart yapıdadır (Teknik, Bulgular, Vasküler, Boyut kategorisi, Sonuç ve öneri). Rapor uzunluğu bilerek kısıtlanmamıştır.
 
-**Modeller.** Tüm modeller aynı koşullarda çalıştırılmıştır (sıcaklık 0.3, en fazla 3500 çıktı tokeni):
+**Modeller.** Tüm modellere aynı girdi, aynı talimat ve aynı sayısal çıktı token sınırı (3500) verilmiştir. Bunun dışındaki üretim koşulları sağlayıcılar arasında tam olarak eşitlenememiştir ve aşağıda ayrıca bildirilmiştir.
 
 | Etiket | Model | Erişim |
 |---|---|---|
@@ -64,13 +64,15 @@ Seçim kodu, girdi dosyasının özeti (SHA-256), terim sürümü ve tüm parame
 | Llama | Llama-3.1-8B-Instruct | Yerel, 4-bit NF4 nicemleme |
 | Template | Kural tabanlı şablon | Kontrol (BDM yok) |
 
-Kural tabanlı şablon, metrikleri sabit cümlelere yerleştirir ve tanım gereği tam sadıktır; BDM'ler için alt referans görevi görür. Gemini (gemini-3.8-flash) de planlanmış, ancak ücretsiz katmandaki günlük istek sınırı nedeniyle yalnızca 6/80 vakada rapor üretebildiği için tüm analizlerden dışlanmıştır.
+**Bildirilen farklar.** (i) *Örnekleme:* Claude Sonnet 5.5 örnekleme parametrelerini (temperature, top_p, top_k) kabul etmez; sağlayıcının varsayılan örneklemesiyle çalıştırılmıştır. Açık modellerde temperature 1.0, top_p 1.0, top_k devre dışı ve repetition_penalty 1.0 kullanılmıştır. Bu ayarın Claude'un belgelenmemiş varsayılanına eşdeğer olduğu kanıtlanmamıştır. (ii) *Düşünme:* Claude'da önden düşünme kapatılmıştır (`between_tools`); açık modellerde böyle bir mod yoktur. (iii) *Seed:* açık modellerde sabittir (42); Claude API'si seed kabul etmez. (iv) *Tokenizer:* her model kendi tokenizer'ını kullanır, dolayısıyla aynı token sınırı farklı metin uzunluklarına karşılık gelebilir. (v) *Sayısal hassasiyet:* açık modeller 4-bit NF4 ağırlıklarla çalıştırılmıştır; Claude'un çıkarım hassasiyeti sağlayıcı tarafından açıklanmamıştır. Her rapor için gönderilen metnin özeti, model kimliği ve uygulanan ayarlar kaydedilmiştir.
+
+**Kural tabanlı kontrol.** Şablon bir BDM değildir; aynı klinik JSON'daki değerleri sabit cümlelere yerleştiren deterministik bir kontroldür ve BDM'lerle aynı üretim mekanizmasına sahip değildir. Ölçülmemiş bir değeri (`null`) "yok" olarak yazmaz. Gemini (gemini-3.8-flash) de planlanmış, ancak ücretsiz katmandaki günlük istek sınırı nedeniyle yalnızca 6/80 vakada rapor üretebildiği için tüm analizlerden dışlanmıştır.
 
 ## 2.6 Değerlendirme
 
 ### 2.6.1 Sayısal sadakat
 
-Her vakanın ölçüm dosyasından doğrulanacak "gerçekler" listesi türetilmiştir (en büyük lezyon çapı ve hacmi, toplam tümör hacmi, her damar için mesafe ve sarma açısı). Bir gerçek, raporda aynı birim kategorisinde (uzunluk, hacim, açı) ve ilgili bağlam sözcüğüyle (ör. *diameter, volume, aorta*) aynı cümlede, |fark| ≤ max(0.5, %2 × değer) toleransıyla geçiyorsa "desteklenmiş" sayılmıştır. Birimler normalize edilmiştir (cm → mm; cc, ml → cm³). Sadakat oranı = desteklenen gerçek / toplam gerçek. Doğrulanacak gerçeği olmayan vakalar (lezyon bulunmayan vakalar) ortalamaya katılmamıştır. Bu metrik, raporda verilmeyen bir bulgunun eklenip eklenmediğini ölçmez; bu nedenle lezyon beyanı ayrıca değerlendirilmiştir (2.6.4).
+Her vakanın ölçüm dosyasından doğrulanacak "gerçekler" listesi türetilmiştir (en büyük lezyon çapı ve hacmi, toplam tümör hacmi, her damar için mesafe ve sarma açısı). Bir gerçek, raporda aynı birim kategorisinde (uzunluk, hacim, açı) ve ilgili bağlam sözcüğüyle (ör. *diameter, volume, aorta*) aynı cümlede, |fark| ≤ max(0.5, %2 × değer) toleransıyla geçiyorsa "desteklenmiş" sayılmıştır. Birimler normalize edilmiştir (cm → mm; cc, ml → cm³). Sadakat oranı = desteklenen gerçek / toplam gerçek. Doğrulanacak gerçeği olmayan vakalar (lezyon bulunmayan vakalar) ortalamaya katılmamıştır. Bu metrik yalnızca verilen değerlerin aktarımını ölçer; raporda verilmeyen, dayanaksız klinik iddiaların eklenmesini cezalandırmaz. Lezyon beyanı ayrıca değerlendirilmiştir (2.6.4); dayanaksız ekleme ve eksik bulgu değerlendirmesi [PLANLANDI].
 
 ### 2.6.2 Tespit
 
@@ -92,14 +94,17 @@ Metin benzerliği için ROUGE-L (F1, sözcük düzeyinde en uzun ortak alt dizi)
 
 ## 2.7 Yazılım, tekrarlanabilirlik ve veri güvenliği
 
-İşlem hattı Python ile yazılmıştır; segmentasyon, ölçüm, raporlama ve değerlendirme tek bir çekirdek paket (`pipeline/`) üzerinden yürütülür ve 112 otomatik test içerir. Ölçüm sonuçları ve raporlar önbelleğe alınır; yarıda kalan koşular kaldığı yerden devam eder. API anahtarları koda gömülmemiş, ortam değişkenlerinden okunmuştur. Kaynak kod GitHub'da paylaşılmaktadır [KONTROL: depo erişimi açık mı olacak]; RUA gereği görüntü, rapor metni ve çalışma kimlikleri paylaşılmamıştır.
+İşlem hattı Python ile yazılmıştır; segmentasyon, ölçüm, raporlama ve değerlendirme tek bir çekirdek paket (`pipeline/`) üzerinden yürütülür ve 125 otomatik test içerir. Ölçüm sonuçları ve raporlar önbelleğe alınır; rapor önbelleği gönderilen metnin özetine, model kimliğine ve üretim ayarlarına bağlıdır, farklı bir deneyin raporu yeniden kullanılmaz. API anahtarları koda gömülmemiş, ortam değişkenlerinden okunmuştur. Kaynak kod GitHub'da paylaşılmaktadır [KONTROL: depo erişimi açık mı olacak]; RUA gereği görüntü, rapor metni ve çalışma kimlikleri paylaşılmamıştır.
 
 ---
 
 ## Yazarken dikkat (Yöntem'e özgü)
 
-1. **İstemde organ adı Türkçe verildi** (`Organ: karaciger` / `pankreas`), raporlar ise İngilizce istendi. Bu, Bulgular'da bir model için organ karışıklığına yol açtığı için Yöntem'de açıkça belirtilmeli; Sınırlılıklar'da da geçmeli.
-2. **"Zero-shot"** ifadesi korunmalı: modeller Merlin'de eğitilmedi. Bu, uçtan uca sonuçların yorumunun merkezinde.
-3. **QC katmanı keşifseldir.** Bulgular'da da bu şekilde sunulmalı; ana sonuç tüm vakalar üzerinden verilmeli.
-4. **"18 vakada r = 0.96" ya da "12 vakada r = 0.99" kullanılmaz.** O alt kümeler sonuca göre seçildi (bkz. `proje ilerlemesi/ilerleme.md` 15.3).
-5. Sadakat metriği **eklemeyi değil, aktarımı** ölçer; bu ayrım hem burada hem Tartışma'da korunmalı.
+1. **İlk rapor seti farklı girdiyle üretildi:** etiketli düz metin, Türkçe organ ve damar değerleri ("karaciger", "portal ven", "vci"), açık modellerde sıcaklık 0.3, ayrı sistem mesajı. Makaledeki ana sonuçlar yeni İngilizce JSON deneyinden (`reports_en_json_v3`) gelecek. İlk set ancak açıkça ayrı bir ön deney olarak anılabilir.
+2. **"Tüm koşullar eşit" yazılmaz.** Doğru ifade: aynı girdi, aynı talimat, aynı sayısal çıktı token sınırı. Örnekleme, seed, tokenizer ve hassasiyet farkları bildirilir. Claude için "tam hassasiyet" yazılmaz.
+3. **Şablon bir kontroldür.** BDM'lerle aynı mekanizmaya sahipmiş gibi anlatılmaz.
+4. **Fantom testleri** yalnızca test edilen geometrilerde hesaplamayı doğrular; gerçek vakalardaki sapmaların tamamını segmentasyona bağlamak için tek başına yeterli değildir.
+5. **"BDM darboğaz değil" sonucu henüz yazılmaz.** Bu yorum, yeni raporlarda organ doğruluğu, eksik bulgu ve dayanaksız ekleme değerlendirmesi tamamlandıktan sonra tartışılacak.
+6. **"Zero-shot"** ifadesi korunmalı: segmentasyon modelleri Merlin'de eğitilmedi.
+7. **QC katmanı keşifseldir.** Ana sonuç tüm vakalar üzerinden verilir.
+8. **"18 vakada r = 0.96" ya da "12 vakada r = 0.99" kullanılmaz.** O alt kümeler sonuca göre seçildi (bkz. `proje ilerlemesi/ilerleme.md` 15.3).
