@@ -429,12 +429,19 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         print("  (reports_final.xlsx verilmedi/bulunamadı -> ROUGE-L atlanır; "
               "lezyon beyanı ve çap kıyası yine yapılır)")
     rapor_satir: list[dict[str, Any]] = []
+    gecersiz: dict[str, list[str]] = {}   # model -> geçersiz (kesik/boş) rapor vakaları
     for s in ortak:
         ad, organ = cases[s]["ad"], cases[s]["organ"]
         r = refs[s]
         gt_pos, ref_mm = r.group.upper() == "POS", reference.reference_mm(r)
         ref_org = " . ".join(organ_sentences(rad_text.get(s, ""), organ)) if organ else ""
         for p in sorted(glob.glob(os.path.join(a.reports, f"{ad}__*.txt"))):
+            if p.endswith(".gecersiz.txt"):
+                # Geçersiz çıktı RAPOR DEĞİLDİR: puanlanmaz, ayrı sayılır.
+                m_bad = os.path.basename(p)[:-len(".gecersiz.txt")].split("__")[-1]
+                if m_bad not in EXCLUDE_MODELS:
+                    gecersiz.setdefault(m_bad, []).append(s)
+                continue
             model = os.path.splitext(os.path.basename(p))[0].split("__")[-1]
             if model in EXCLUDE_MODELS:
                 continue
@@ -458,7 +465,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     _write_csv(out / "rapor_kiyas_vaka.csv", rapor_satir)
 
     ozet = []
-    for model in sorted({x["model"] for x in rapor_satir}):
+    for model in sorted({x["model"] for x in rapor_satir} | set(gecersiz)):
         rs = [x for x in rapor_satir if x["model"] == model]
         tp = sum(1 for x in rs if x["gt_pozitif"] and x["rapor_pozitif"])
         fn = sum(1 for x in rs if x["gt_pozitif"] and not x["rapor_pozitif"])
@@ -467,7 +474,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         farklar = [x["abs_fark_mm"] for x in rs if x["abs_fark_mm"] != ""]
         rouges = [x["rouge_l"] for x in rs if x["rouge_l"] not in ("", None)]
         ozet.append({
-            "model": model, "n": len(rs), "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+            "model": model, "n": len(rs), "n_gecersiz": len(gecersiz.get(model, [])),
+            "TP": tp, "FP": fp, "TN": tn, "FN": fn,
             "duyarlilik": round(tp / (tp + fn), 3) if (tp + fn) else "",
             "ozgulluk": round(tn / (tn + fp), 3) if (tn + fp) else "",
             "dogruluk": round((tp + tn) / len(rs), 3) if rs else "",
@@ -482,7 +490,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     _write_csv(out / "rapor_kiyas_ozet.csv", ozet)
     sonuc["rapor"] = ozet
     for o in ozet:
-        print(f"  {o['model']:9} n={o['n']:3} · duy={o['duyarlilik']} özg={o['ozgulluk']} "
+        print(f"  {o['model']:9} n={o['n']:3} (+{o['n_gecersiz']} geçersiz) · duy={o['duyarlilik']} özg={o['ozgulluk']} "
               f"doğ={o['dogruluk']} · çap MAE={o['cap_MAE_mm']} (n={o['cap_n']}, "
               f"medyan={o['cap_medyan_AE']}) · ROUGE-L={o['rouge_l_ort']} (n={o['rouge_n']}) · organ adı doğru={o['organ_adi_dogru']} organ karışıklığı={o['organ_karisikligi']}")
 
