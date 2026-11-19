@@ -89,10 +89,9 @@ class TestPromptIsEnglish(unittest.TestCase):
                    "vci": {"mesafe_mm": 47.2, "sarma_derece": None}}
         for organ, en in (("karaciger", "liver"), ("pankreas", "pancreas")):
             f = REP.build_findings(organ=organ, summary=summary, vessels=vessels)
-            text = REP.build_prompt(f) + "
-" + REP.template_report(f)
+            text = REP.build_prompt(f) + " " + REP.template_report(f)
             self.assertIn(en, text)
-            self.assertIsNone(re.search(r"karaci|pankreas|portal ven|vci", text, re.I))
+            self.assertIsNone(re.search(r"karaci|pankreas|portal ven(?!o)|vci", text, re.I))
 
 
 if __name__ == "__main__":
